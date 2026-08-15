@@ -1,0 +1,4 @@
+allowBuilds:
+  # Only used by electron-builder's Squirrel.Windows target; this app ships
+  # NSIS installers, so the 7z-arch selection script stays denied.
+  electron-winstaller: false

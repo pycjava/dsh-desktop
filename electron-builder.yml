@@ -1,0 +1,45 @@
+appId: com.deepseek.dsh
+productName: DeepSeek Harness
+# Relative to the repo root (the app dir).
+directories:
+  output: dist-desktop/release
+# Only the Electron main/preload go into asar; the backend closure ships as
+# real files under resources/ so Cordis's runtime bare-imports resolve.
+files:
+  - src/main.cjs
+  - src/preload.cjs
+  - package.json
+extraResources:
+  - from: dist-desktop/backend
+    to: backend
+    filter:
+      - '**/*'
+      - '!node_modules'
+  # electron-builder hard-excludes any `node_modules` directly under a
+  # matcher root (app-builder-lib out/util/filter.js), regardless of filter
+  # patterns. Mapping node_modules as its own from-root sidesteps that rule;
+  # nested node_modules inside packages still match '**/*' and are copied.
+  # The npm ci layout is flat with real files at the top level, so no symlink
+  # materialization is needed.
+  - from: dist-desktop/backend/node_modules
+    to: backend/node_modules
+    filter:
+      - '**/*'
+asar: true
+# Do NOT rebuild native modules for Electron's ABI: the backend runs under the
+# user's standalone Node, not Electron's. Keeping extraResources untouched
+# preserves the Node ABI the prebuilt addons were built against.
+nodeGypRebuild: false
+npmRebuild: false
+# Arch comes from the invoking CLI flag (--x64 / --arm64; scripts/
+# build-desktop-installer.mjs always passes it, matching the closure's --arch).
+# A bare `electron-builder` run defaults to x64.
+win:
+  target: nsis
+nsis:
+  # Arch in the artifact name: both installers land in dist-desktop/release/
+  # sibling directories and users pick the right download by arch.
+  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

@@ -1,0 +1,10 @@
+{
+  "name": "@deepseek-ai/dsh-desktop-backend",
+  "version": "0.1.0-rc.5",
+  "private": true,
+  "description": "Registry manifest for the desktop app's backend closure: pinned published @deepseek-ai/dsh with its dependency tree. scripts/build-desktop-backend.mjs installs this with npm ci narrowed to one Windows architecture; the committed package-lock.json is what makes staging reproducible. NOT a pnpm workspace member (apps/* is one level): linkWorkspacePackages would otherwise swap the registry pin for the local apps/cli source.",
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/dsh": "0.1.0-rc.6"
+  }
+}
