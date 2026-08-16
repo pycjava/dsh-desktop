@@ -5,15 +5,15 @@
  *
  * The closure is owned by backend/ (a committed dependency manifest + lockfile
  * pinning @deepseek-ai/dsh). This script materializes it with `npm ci`
- * narrowed to one Windows CPU architecture, promotes the CLI package to the
- * staging root — the layout the desktop shell launches: `node lib/bin.js` with
- * `node_modules` beside it — prunes what the backend never loads, asserts the
- * target architecture's binaries, and verifies the standalone run on the host
- * architecture. Output: dist-desktop/backend.
+ * narrowed to one target platform/CPU architecture, promotes the CLI package
+ * to the staging root — the layout the desktop shell launches: `node
+ * lib/bin.js` with `node_modules` beside it — prunes what the backend never
+ * loads, asserts the target platform's binaries, and verifies the standalone
+ * run when the host matches the target. Output: dist-desktop/backend.
  *
  * Pipeline: npm ci (target os/cpu, scripts ignored) -> promote CLI package ->
  * assert frontend dist -> prune runtime-dead files and non-target binaries ->
- * assert target binaries -> verify standalone run (native arch only).
+ * assert target binaries -> verify standalone run (native platform only).
  *
  * Install-time platform filtering stages only the target's platform-optional
  * leaves (sharp's `@img/*` and koffi's `@koromix/*` declare os/cpu). node-pty
@@ -26,7 +26,7 @@
 import { spawn } from 'node:child_process'
 import http from 'node:http'
 import { existsSync, statSync } from 'node:fs'
-import { cp, readdir, rm, rmdir } from 'node:fs/promises'
+import { chmod, cp, readdir, rm, rmdir } from 'node:fs/promises'
 import { join, resolve, dirname, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -42,7 +42,9 @@ const ENTRY = join('lib', 'bin.js')
 const CLI_PACKAGE = join('node_modules', '@deepseek-ai', 'dsh')
 /** Frontend dist must ship inside the registry closure (asserted, never copied). */
 const FRONTEND_DIST = join('node_modules', '@deepseek-ai', 'dsh-web-frontend', 'dist', 'index.html')
-/** Windows CPU architectures Electron 43 publishes installers for. */
+/** Platforms the desktop installers target (Electron 43 publishes installers for these). */
+const PLATFORMS = ['win32', 'darwin']
+/** CPU architectures Electron 43 publishes installers for. */
 const ARCHES = ['x64', 'arm64']
 
 const npmBin = () => (process.platform === 'win32' ? 'npm.cmd' : 'npm')
@@ -69,12 +71,13 @@ function run(label, command, args, cwd = root) {
 
 /**
  * Copy the committed manifest into a cleared staging directory and install the
- * closure for one Windows architecture. The lockfile makes the install
- * reproducible; `--cpu` leaves platform-optional packages of other
- * architectures unstaged.
- * @param {string} arch target Windows CPU architecture
+ * closure for one target platform/architecture. The lockfile makes the install
+ * reproducible; `--cpu` and `--os` leave platform-optional packages of other
+ * targets unstaged.
+ * @param {string} platform target OS (`win32` | `darwin`)
+ * @param {string} arch target CPU architecture
  */
-async function installStaging(arch) {
+async function installStaging(platform, arch) {
   if (STAGING === root || root.startsWith(STAGING + sep)) {
     throw new Error(`refusing to clear staging ${STAGING}: contains repo root`)
   }
@@ -85,7 +88,7 @@ async function installStaging(arch) {
   }
   await run('install', npmBin(), [
     'ci', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund',
-    '--os=win32', `--cpu=${arch}`,
+    `--os=${platform}`, `--cpu=${arch}`,
   ], STAGING)
 }
 
@@ -123,21 +126,24 @@ const WINDOWS_CPU_DIR = /^win1[01]-(x64|arm64|ia32)$/i
 /**
  * Delete files the backend never loads at runtime: source maps, TypeScript
  * declarations, tsbuildinfo artifacts, non-license docs, Windows debug symbols,
- * and every binary built for another architecture inside single-tarball
- * packages (prebuildify dirs like node-pty's `prebuilds/<platform>-<arch>`,
- * Windows-version-scoped dirs like node-pty's conpty `win10-arm64`). The NSIS
- * installer writes files one by one through Defender's real-time scan, so
- * every dead file multiplies install time. Platform-optional leaf packages
- * need no pruning here: install-time `--cpu` filtering never stages them.
- * `.ts` sources stay: Node >=22.19 type-stripping keeps them runtime-loadable,
- * and no blanket rule separates shipped-source packages from dead weight.
- * @param {string} arch target Windows CPU architecture
+ * and every binary built for another platform/architecture inside
+ * single-tarball packages (prebuildify dirs like node-pty's
+ * `prebuilds/<platform>-<arch>`, Windows-version-scoped dirs like node-pty's
+ * conpty `win10-arm64`). The Windows installer writes files one by one through
+ * Defender's real-time scan, so every dead file multiplies install time.
+ * Platform-optional leaf packages need no pruning here: install-time `--os`
+ * and `--cpu` filtering never stages them. `.ts` sources stay: Node >=22.19
+ * type-stripping keeps them runtime-loadable, and no blanket rule separates
+ * shipped-source packages from dead weight.
+ * @param {string} platform target OS (`win32` | `darwin`)
+ * @param {string} arch target CPU architecture
  * @returns {Promise<void>}
  */
-async function pruneRuntimeDeadWeight(arch) {
+async function pruneRuntimeDeadWeight(platform, arch) {
   const FILE = /\.(map|d\.ts|tsbuildinfo|pdb)$/i
   const DOC = /\.md$/i
   const KEPT_DOC = /(licen[cs]e|notice|copying|third[-_]party)/i
+  const target = `${platform}-${arch}`
   let removed = 0
   let foreign = 0
   const walk = async (dir) => {
@@ -146,14 +152,20 @@ async function pruneRuntimeDeadWeight(arch) {
       if (entry.isDirectory()) {
         if (entry.name === 'prebuilds') {
           for (const child of await readdir(p, { withFileTypes: true }).catch(() => [])) {
-            if (child.name === `win32-${arch}`) continue
+            if (child.name === target) continue
             await rm(join(p, child.name), { recursive: true, force: true })
             foreign++
           }
-        } else if (WINDOWS_CPU_DIR.test(entry.name) && entry.name.toLowerCase() !== `win10-${arch}` && entry.name.toLowerCase() !== `win11-${arch}`) {
-          await rm(p, { recursive: true, force: true })
-          foreign++
-          continue
+        } else if (WINDOWS_CPU_DIR.test(entry.name)) {
+          const isTargetWindowsCpuDir = platform === 'win32' && (
+            entry.name.toLowerCase() === `win10-${arch}` ||
+            entry.name.toLowerCase() === `win11-${arch}`
+          )
+          if (!isTargetWindowsCpuDir) {
+            await rm(p, { recursive: true, force: true })
+            foreign++
+            continue
+          }
         }
         await walk(p)
         // Drop directories pruning emptied (e.g. a types/ dir holding only
@@ -166,23 +178,27 @@ async function pruneRuntimeDeadWeight(arch) {
     }
   }
   await walk(STAGING)
-  console.log(`build-desktop-backend: pruned ${removed} runtime-dead files (maps, declarations, build-info, docs, debug symbols) and ${foreign} foreign-architecture entries (target win32-${arch})`)
+  console.log(`build-desktop-backend: pruned ${removed} runtime-dead files (maps, declarations, build-info, docs, debug symbols) and ${foreign} foreign-architecture entries (target ${target})`)
 }
 
 /**
- * Fail loud when the closure lacks the target architecture's loadable
+ * Fail loud when the closure lacks the target platform/architecture's loadable
  * binaries. Each family is optional at the dependency-graph level, so a
- * missing family is fine; a family present without its win32-<arch> variant
- * means the install or prune staged dead binaries.
- * @param {string} arch target Windows CPU architecture
+ * missing family is fine; a family present without its <platform>-<arch>
+ * variant means the install or prune staged dead binaries.
+ * @param {string} platform target OS (`win32` | `darwin`)
+ * @param {string} arch target CPU architecture
  * @returns {void}
  */
-function assertTargetBinaries(arch) {
-  const target = `win32-${arch}`
+function assertTargetBinaries(platform, arch) {
+  const target = `${platform}-${arch}`
   const ptyDir = join(STAGING, 'node_modules', 'node-pty', 'prebuilds', target)
-  for (const addon of ['pty.node', 'conpty.node', 'conpty_console_list.node']) {
+  const ptyAddons = platform === 'win32'
+    ? ['pty.node', 'conpty.node', 'conpty_console_list.node']
+    : ['pty.node', 'spawn-helper']
+  for (const addon of ptyAddons) {
     if (!existsSync(join(ptyDir, addon))) {
-      throw new Error(`node-pty ${target} prebuild missing ${addon}; install did not stage target-arch binaries`)
+      throw new Error(`node-pty ${target} prebuild missing ${addon}; install did not stage target binaries`)
     }
   }
   const leafFamilies = [
@@ -197,16 +213,31 @@ function assertTargetBinaries(arch) {
 }
 
 /**
+ * node-pty's darwin prebuild tarball ships `spawn-helper` mode 0644, but the
+ * native addon posix_spawns it on the first terminal fork. Make it executable
+ * so the packaged backend works without running node-pty's install scripts.
+ * @param {string} arch target CPU architecture
+ * @returns {Promise<void>}
+ */
+async function ensureDarwinHelperExecutable(arch) {
+  const helper = join(STAGING, 'node_modules', 'node-pty', 'prebuilds', `darwin-${arch}`, 'spawn-helper')
+  await chmod(helper, 0o755)
+  console.log('build-desktop-backend: marked node-pty spawn-helper executable')
+}
+
+/**
  * Spawn the staged backend and confirm it serves the UI (HTTP 200) on a
  * loopback port. This is the go/no-go check for the whole packaging route.
- * Cross-arch builds skip it: the boot path dlopens target-arch addons (koffi
- * backs JSONL durability from first write), which cannot load under a host
- * node of another architecture; assertTargetBinaries covers those builds.
- * @param {string} arch target Windows CPU architecture
+ * Cross-platform/arch builds skip it: the boot path dlopens target-arch
+ * addons (koffi backs JSONL durability from first write), which cannot load
+ * under a host node of another platform/architecture; assertTargetBinaries
+ * covers those builds.
+ * @param {string} platform target OS (`win32` | `darwin`)
+ * @param {string} arch target CPU architecture
  */
-async function verifyRun(arch) {
-  if (process.platform !== 'win32' || process.arch !== arch) {
-    console.log(`build-desktop-backend: skipping runtime verify: closure targets win32-${arch}, host is ${process.platform}-${process.arch}`)
+async function verifyRun(platform, arch) {
+  if (process.platform !== platform || process.arch !== arch) {
+    console.log(`build-desktop-backend: skipping runtime verify: closure targets ${platform}-${arch}, host is ${process.platform}-${process.arch}`)
     return
   }
   const entry = join(STAGING, ENTRY)
@@ -292,16 +323,29 @@ function report() {
 
 async function main() {
   const argv = process.argv.slice(2)
-  const archIdx = argv.indexOf('--arch')
-  const arch = archIdx >= 0 ? argv[archIdx + 1] : 'x64'
+  /**
+   * @param {string} name
+   * @returns {string | null}
+   */
+  const flag = (name) => {
+    const idx = argv.lastIndexOf(`--${name}`)
+    if (idx < 0) return null
+    const value = argv[idx + 1]
+    if (!value || value.startsWith('--')) throw new Error(`--${name} requires a value`)
+    return value
+  }
+  const platform = flag('platform') ?? 'win32'
+  const arch = flag('arch') ?? 'x64'
+  if (!PLATFORMS.includes(platform)) throw new Error(`unknown --platform ${platform}; expected one of ${PLATFORMS.join(', ')}`)
   if (!ARCHES.includes(arch)) throw new Error(`unknown --arch ${arch}; expected one of ${ARCHES.join(', ')}`)
-  console.log(`build-desktop-backend: target architecture win32-${arch}`)
-  await installStaging(arch)
+  console.log(`build-desktop-backend: target ${platform}-${arch}`)
+  await installStaging(platform, arch)
   await promoteCliPackage()
   await assertFrontendDist()
-  await pruneRuntimeDeadWeight(arch)
-  assertTargetBinaries(arch)
-  await verifyRun(arch)
+  await pruneRuntimeDeadWeight(platform, arch)
+  assertTargetBinaries(platform, arch)
+  if (platform === 'darwin') await ensureDarwinHelperExecutable(arch)
+  await verifyRun(platform, arch)
   report()
   console.log(`build-desktop-backend: closure file count: ${await countFiles(STAGING)}`)
   console.log('build-desktop-backend: done.')

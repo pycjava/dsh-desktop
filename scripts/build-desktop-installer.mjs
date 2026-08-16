@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 /**
- * One-shot desktop installer build for one Windows architecture: stage the
- * backend closure, then run electron-builder for the same architecture.
+ * One-shot desktop installer build for one target platform/architecture:
+ * stage the backend closure, then run electron-builder for the same target.
  *
- * Usage: node scripts/build-desktop-installer.mjs [--arch x64|arm64]
- * Artifacts land in dist-desktop/release/<arch>/ (installer + win-unpacked).
+ * Usage:
+ *   node scripts/build-desktop-installer.mjs [--platform win32|darwin] [--arch x64|arm64]
+ * Artifacts land in dist-desktop/release/<platform>/<arch>/.
+ *
+ * Windows installers cross-build from any host. macOS DMG/ZIP builds must run
+ * on macOS: electron-builder's DMG tooling uses macOS-only hdiutil.
  */
 import { spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
@@ -14,13 +18,30 @@ import { fileURLToPath } from 'node:url'
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 /** electron-builder reads its config (electron-builder.yml) at the repo root. */
 const APP_DIR = root
-/** Windows CPU architectures Electron 43 publishes installers for. */
+/** Platforms the desktop installers target (Electron 43 publishes installers for these). */
+const PLATFORMS = ['win32', 'darwin']
+/** CPU architectures Electron 43 publishes installers for. */
 const ARCHES = ['x64', 'arm64']
 
 const argv = process.argv.slice(2)
-const archIdx = argv.indexOf('--arch')
-const arch = archIdx >= 0 ? argv[archIdx + 1] : 'x64'
+/**
+ * @param {string} name
+ * @returns {string | null}
+ */
+const flag = (name) => {
+  const idx = argv.lastIndexOf(`--${name}`)
+  if (idx < 0) return null
+  const value = argv[idx + 1]
+  if (!value || value.startsWith('--')) throw new Error(`--${name} requires a value`)
+  return value
+}
+const platform = flag('platform') ?? 'win32'
+const arch = flag('arch') ?? 'x64'
+if (!PLATFORMS.includes(platform)) throw new Error(`unknown --platform ${platform}; expected one of ${PLATFORMS.join(', ')}`)
 if (!ARCHES.includes(arch)) throw new Error(`unknown --arch ${arch}; expected one of ${ARCHES.join(', ')}`)
+if (platform === 'darwin' && process.platform !== 'darwin') {
+  throw new Error('macOS installers must be built on macOS (DMG creation requires hdiutil); stage the darwin backend closure with scripts/build-desktop-backend.mjs --platform darwin on any host instead')
+}
 
 /**
  * Resolve electron-builder's bin entry through this repo's dependency tree.
@@ -57,18 +78,21 @@ function run(label, command, args, cwd = root) {
   })
 }
 
-console.log(`build-desktop-installer: building win32-${arch} installer`)
+const outDir = resolve(root, 'dist-desktop', 'release', platform, arch)
+console.log(`build-desktop-installer: building ${platform}-${arch} installer`)
 await run('backend closure', process.execPath, [
   resolve(root, 'scripts', 'build-desktop-backend.mjs'),
+  '--platform', platform,
   '--arch', arch,
 ])
 await run('electron-builder', process.execPath, [
   electronBuilderCli(),
-  '--win', 'nsis', `--${arch}`,
-  `--config.directories.output=${resolve(root, 'dist-desktop', 'release', arch)}`,
+  ...(platform === 'win32' ? ['--win', 'nsis'] : ['--mac', 'dmg', 'zip']),
+  `--${arch}`,
+  `--config.directories.output=${outDir}`,
   // run() exports CI=true, which makes electron-builder attempt an implicit
   // GitHub publish and fail without GH_TOKEN. This script only ever produces
   // local artifacts, so publishing stays an explicit, separate step.
   '--publish', 'never',
 ], APP_DIR)
-console.log(`build-desktop-installer: done — dist-desktop/release/${arch}/`)
+console.log(`build-desktop-installer: done — ${outDir}/`)

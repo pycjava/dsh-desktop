@@ -36,6 +36,8 @@ let backend = null
 /** @type {Electron.BrowserWindow | null} */
 let win = null
 let quitting = false
+/** Node executable resolved by checkNode(); backendSpec spawns this. */
+let nodeCmd = 'node'
 
 // Title-bar controls: the custom title bar is injected into the renderer by
 // preload.cjs and calls back over these channels.
@@ -58,7 +60,7 @@ ipcMain.on('win:close', () => win?.close())
 function backendSpec () {
   if (app.isPackaged) {
     const backendRoot = path.join(process.resourcesPath, 'backend')
-    return { cwd: backendRoot, cmd: 'node', args: [path.join(backendRoot, 'lib', 'bin.js'), 'web', '--port', '0'] }
+    return { cwd: backendRoot, cmd: nodeCmd, args: [path.join(backendRoot, 'lib', 'bin.js'), 'web', '--port', '0'] }
   }
   const sourceRepo = process.env.DSH_SOURCE_REPO
   if (sourceRepo) {
@@ -66,32 +68,128 @@ function backendSpec () {
     if (!fs.existsSync(cliBin)) {
       throw new Error(`DSH_SOURCE_REPO points at ${sourceRepo}, which has no ${cliBin}`)
     }
-    return { cwd: sourceRepo, cmd: 'node', args: ['--import', 'tsx/esm', cliBin, 'web', '--port', '0'] }
+    return { cwd: sourceRepo, cmd: nodeCmd, args: ['--import', 'tsx/esm', cliBin, 'web', '--port', '0'] }
   }
   const entry = path.join(STAGED_BACKEND, 'lib', 'bin.js')
   if (!fs.existsSync(entry)) {
     throw new Error(`backend not staged at ${entry}; run "pnpm run backend" first, or set DSH_SOURCE_REPO to a dsh checkout`)
   }
-  return { cwd: STAGED_BACKEND, cmd: 'node', args: [entry, 'web', '--port', '0'] }
+  return { cwd: STAGED_BACKEND, cmd: nodeCmd, args: [entry, 'web', '--port', '0'] }
 }
 
 const MIN_NODE_MAJOR = 22
 
+/** Common standalone Node locations for macOS GUI apps, checked when plain
+ * `node` is not on the GUI PATH (Finder-launched apps don't inherit the shell
+ * PATH, so Homebrew/MacPorts installs are invisible by default). */
+const DARWIN_NODE_CANDIDATES = [
+  '/opt/homebrew/bin/node',
+  '/usr/local/bin/node',
+  '/opt/local/bin/node',
+  '/usr/bin/node',
+]
+
 /**
- * Verify the user's Node on PATH satisfies the backend's minimum. Returns an
- * error message to surface (and quit) or null when acceptable.
+ * Return `node -v` output for a candidate executable, or null when it cannot
+ * be run.
+ * @param {string} cmd
+ * @returns {string | null}
+ */
+function nodeVersion (cmd) {
+  try {
+    return execFileSync(cmd, ['-v'], {
+      encoding: 'utf8',
+      // `node` on Windows may be resolved through PATHEXT shims; explicit
+      // paths must not be re-interpreted by cmd (spaces in e.g. Program Files).
+      shell: process.platform === 'win32' && cmd === 'node',
+      timeout: 10_000,
+    }).trim()
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Last-resort macOS lookup: ask the user's login shell where `node` lives.
+ * The shell rc can print anything (or hang), so use a marker line and a short
+ * timeout; every failure falls back to the standard error message.
+ * @returns {string | null}
+ */
+function nodeFromLoginShell () {
+  if (process.platform !== 'darwin') return null
+  const shellPath = process.env.SHELL || '/bin/zsh'
+  const marker = '__DSH_NODE_PATH__'
+  try {
+    const output = execFileSync(shellPath, ['-ilc', `printf '${marker}%s' "$(command -v node)"`], {
+      encoding: 'utf8',
+      timeout: 5_000,
+      maxBuffer: 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    const idx = output.lastIndexOf(marker)
+    if (idx < 0) return null
+    const candidate = output.slice(idx + marker.length).split(/\r?\n/, 1)[0].trim()
+    if (!candidate || candidate === 'node' || !fs.existsSync(candidate)) return null
+    return candidate
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Locate a runnable standalone Node. `DSH_NODE` is an explicit override;
+ * otherwise `node` on PATH wins (previous behavior), then macOS-only standard
+ * locations, then the login shell PATH.
+ * @returns {{ cmd: string | null, version: string | null, error: string | null }}
+ */
+function locateNode () {
+  const explicit = process.env.DSH_NODE
+  if (explicit) {
+    const version = nodeVersion(explicit)
+    if (version) return { cmd: explicit, version, error: null }
+    return {
+      cmd: null,
+      version: null,
+      error: `DSH_NODE points at ${explicit}, but that node binary could not be run.`,
+    }
+  }
+
+  const pathVersion = nodeVersion('node')
+  if (pathVersion) return { cmd: 'node', version: pathVersion, error: null }
+
+  if (process.platform === 'darwin') {
+    for (const candidate of DARWIN_NODE_CANDIDATES) {
+      if (!fs.existsSync(candidate)) continue
+      const version = nodeVersion(candidate)
+      if (version) return { cmd: candidate, version, error: null }
+    }
+    const shellNode = nodeFromLoginShell()
+    if (shellNode) {
+      const version = nodeVersion(shellNode)
+      if (version) return { cmd: shellNode, version, error: null }
+    }
+  }
+
+  return {
+    cmd: null,
+    version: null,
+    error: 'Could not find Node.js on PATH. Install Node.js >= 22.19 (https://nodejs.org) and relaunch DeepSeek Harness. On macOS, set DSH_NODE to your node binary if it lives outside the standard locations.',
+  }
+}
+
+/**
+ * Verify the user's Node satisfies the backend's minimum and remember the
+ * resolved executable for backendSpec(). Returns an error message to surface
+ * (and quit) or null when acceptable.
  * @returns {string | null}
  */
 function checkNode () {
-  let version
-  try {
-    version = execFileSync('node', ['-v'], { encoding: 'utf8', shell: process.platform === 'win32' }).trim()
-  } catch {
-    return 'Could not find Node.js on PATH. Install Node.js >= 22.19 (https://nodejs.org) and relaunch DeepSeek Harness.'
-  }
-  const major = Number((/^v?(\d+)/.exec(version) ?? [])[1])
+  const located = locateNode()
+  if (located.error || !located.cmd) return located.error
+  nodeCmd = located.cmd
+  const major = Number((/^v?(\d+)/.exec(located.version ?? '') ?? [])[1])
   if (!major || major < MIN_NODE_MAJOR) {
-    return `DeepSeek Harness requires Node.js >= 22.19, but found ${version}. Please upgrade at https://nodejs.org.`
+    return `DeepSeek Harness requires Node.js >= 22.19, but found ${located.version} at ${nodeCmd}. Please upgrade at https://nodejs.org.`
   }
   return null
 }
@@ -103,8 +201,9 @@ function checkNode () {
  */
 function startBackend () {
   return new Promise((resolve, reject) => {
-    // Use the `node` on PATH (not Electron's bundled node) so the backend runs
-    // under a real, project-supported Node version.
+    // Use the user's standalone Node (resolved by checkNode), not Electron's
+    // bundled node, so the backend runs under a real, project-supported Node
+    // version.
     const spec = backendSpec()
     backend = spawn(
       spec.cmd,

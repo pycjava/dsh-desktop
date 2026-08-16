@@ -38,14 +38,23 @@ nodeGypRebuild: false
 npmRebuild: false
 # Arch comes from the invoking CLI flag (--x64 / --arm64; scripts/
 # build-desktop-installer.mjs always passes it, matching the closure's --arch).
-# A bare `electron-builder` run defaults to x64.
+# A bare `electron-builder` run defaults to the host architecture.
 win:
   target: nsis
+mac:
+  target:
+    - dmg
+    - zip
+  # Local unsigned DMGs are buildable without a certificate; set CSC_LINK /
+  # CSC_KEY_PASSWORD (or configure identity) for a signed release build.
+  category: public.app-category.developer-tools
+  # Arch in the artifact name: users pick the right download by arch.
+  artifactName: ${productName}-${version}-${arch}.${ext}
 nsis:
   # Seeds the dsh CLI shims + user PATH entry; see build/installer.nsh.
   include: build/installer.nsh
-  # Arch in the artifact name: both installers land in dist-desktop/release/
-  # sibling directories and users pick the right download by arch.
+  # Arch in the artifact name: installers land in dist-desktop/release/win32/
+  # <arch> and users pick the right download by arch.
   artifactName: ${productName}-${version}-${arch}-setup.${ext}
   oneClick: false
   perMachine: false

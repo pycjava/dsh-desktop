@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.0-rc.5",
+  "version": "0.1.0-rc.6",
   "private": true,
   "description": "Electron desktop shell for DeepSeek Harness: spawns the published dsh web backend on a loopback port and loads the Web UI in a BrowserWindow.",
   "license": "MIT",
@@ -10,7 +10,11 @@
   "scripts": {
     "start": "electron .",
     "backend": "node scripts/build-desktop-backend.mjs --arch x64",
-    "dist": "node scripts/build-desktop-installer.mjs"
+    "backend:mac": "node scripts/build-desktop-backend.mjs --platform darwin --arch arm64",
+    "backend:mac:x64": "node scripts/build-desktop-backend.mjs --platform darwin --arch x64",
+    "dist": "node scripts/build-desktop-installer.mjs",
+    "dist:mac": "node scripts/build-desktop-installer.mjs --platform darwin --arch arm64",
+    "dist:mac:x64": "node scripts/build-desktop-installer.mjs --platform darwin --arch x64"
   },
   "devDependencies": {
     "electron": "^43.4.0",

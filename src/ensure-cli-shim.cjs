@@ -9,9 +9,9 @@
  * tooling dropped it (build/cli/install-cli-path.ps1, shared with the
  * installer).
  *
- * Windows-only: the desktop shell has no macOS/Linux packaging yet. The
- * shims run the backend under the user's Node from PATH, exactly like the
- * Electron shell itself spawns it (cwd = backend root).
+ * Windows-only by design: macOS builds ship the .app bundle and do not seed a
+ * `dsh` CLI shim. The shims run the backend under the user's Node from PATH,
+ * exactly like the Electron shell itself spawns it (cwd = backend root).
  */
 'use strict'
 
