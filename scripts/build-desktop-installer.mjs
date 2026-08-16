@@ -66,5 +66,9 @@ await run('electron-builder', process.execPath, [
   electronBuilderCli(),
   '--win', 'nsis', `--${arch}`,
   `--config.directories.output=${resolve(root, 'dist-desktop', 'release', arch)}`,
+  // run() exports CI=true, which makes electron-builder attempt an implicit
+  // GitHub publish and fail without GH_TOKEN. This script only ever produces
+  // local artifacts, so publishing stays an explicit, separate step.
+  '--publish', 'never',
 ], APP_DIR)
 console.log(`build-desktop-installer: done — dist-desktop/release/${arch}/`)

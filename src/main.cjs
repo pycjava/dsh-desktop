@@ -19,6 +19,7 @@ const { spawn, execFileSync } = require('node:child_process')
 const http = require('node:http')
 const path = require('node:path')
 const fs = require('node:fs')
+const { ensureCliShim } = require('./ensure-cli-shim.cjs')
 
 /** Repository root (this file lives at src/main.cjs). */
 const ROOT = path.resolve(__dirname, '..')
@@ -245,6 +246,14 @@ async function boot () {
     const port = await startBackend()
     await waitForReady(port)
     createWindow(port)
+    // Expose this install's backend as the `dsh` CLI: rewrite the ~/.dsh/bin
+    // shims (they track this install dir, so upgrades self-heal) and repair
+    // the user PATH entry. Fire-and-forget: the CLI is a convenience, never
+    // a startup dependency.
+    if (app.isPackaged && process.platform === 'win32') {
+      ensureCliShim(path.join(process.resourcesPath, 'backend'))
+        .catch((err) => console.error('[desktop] dsh CLI shim refresh failed:', err.message))
+    }
   } catch (err) {
     console.error('[desktop] startup failed:', err.message)
     killBackend()
