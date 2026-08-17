@@ -1,0 +1,94 @@
+<!doctype html>
+<!-- Local boot page for the desktop shell. Shown the instant the window opens,
+     before any backend exists, so it is fully self-contained: the main process
+     streams boot status to it over the dshBoot bridge (preload.cjs) and
+     navigates the window away once the backend answers. preload.cjs injects
+     the same frameless title bar as on the real UI, hence the top padding. -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>DeepSeek Harness</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    padding-top: 36px; box-sizing: border-box;
+    background: #ffffff; color: #1f2328;
+    font-family: system-ui, 'Segoe UI', sans-serif;
+    -webkit-app-region: drag;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #151517; color: #f9fafb; }
+  }
+  main { text-align: center; max-width: 560px; padding: 0 24px; }
+  .brand { font-size: 18px; font-weight: 600; letter-spacing: 0.01em; opacity: 0.9; margin-bottom: 22px; }
+  .spinner {
+    width: 26px; height: 26px; margin: 0 auto 18px;
+    border: 2.5px solid rgba(128, 128, 128, 0.25);
+    border-top-color: rgba(128, 128, 128, 0.9);
+    border-radius: 50%;
+    animation: dsh-spin 0.9s linear infinite;
+  }
+  @keyframes dsh-spin { to { transform: rotate(360deg); } }
+  #message { font-size: 13.5px; opacity: 0.75; margin: 0 0 18px; white-space: pre-line; }
+  #error { display: none; }
+  #detail {
+    display: block; text-align: left;
+    font: 11.5px/1.5 ui-monospace, Consolas, monospace;
+    max-height: 180px; overflow: auto;
+    white-space: pre-wrap; word-break: break-all;
+    -webkit-user-select: text;
+    user-select: text;
+    background: rgba(128, 128, 128, 0.12);
+    border: 1px solid rgba(128, 128, 128, 0.25);
+    border-radius: 8px; padding: 10px 12px; margin: 0 0 16px;
+  }
+  #detail:empty { display: none; }
+  button {
+    -webkit-app-region: no-drag;
+    font: inherit; font-size: 13px; padding: 7px 22px;
+    color: inherit; background: rgba(128, 128, 128, 0.15);
+    border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(128, 128, 128, 0.25); }
+</style>
+</head>
+<body>
+  <main>
+    <div class="brand">DeepSeek Harness</div>
+    <div id="spinner" class="spinner"></div>
+    <p id="message">正在启动…</p>
+    <div id="error">
+      <pre id="detail"></pre>
+      <button id="retry" type="button">重试</button>
+    </div>
+  </main>
+  <script>
+    'use strict'
+    const spinner = document.getElementById('spinner')
+    const message = document.getElementById('message')
+    const error = document.getElementById('error')
+    const detail = document.getElementById('detail')
+
+    function render (status) {
+      message.textContent = status.state === 'error'
+        ? ('启动失败：' + (status.message || '未知错误'))
+        : (status.message || '')
+      spinner.style.display = status.state === 'error' ? 'none' : 'block'
+      error.style.display = status.state === 'error' ? 'block' : 'none'
+      detail.textContent = status.detail || ''
+    }
+
+    if (window.dshBoot) {
+      window.dshBoot.onStatus(render)
+      document.getElementById('retry').addEventListener('click', () => window.dshBoot.retry())
+      window.dshBoot.ready()
+    }
+  </script>
+</body>
+</html>

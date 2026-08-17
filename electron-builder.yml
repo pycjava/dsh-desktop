@@ -9,6 +9,7 @@ files:
   - src/main.cjs
   - src/ensure-cli-shim.cjs
   - src/preload.cjs
+  - src/boot.html
   - package.json
 extraResources:
   - from: dist-desktop/backend

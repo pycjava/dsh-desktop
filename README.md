@@ -10,12 +10,19 @@ so the full agent runtime and UI run locally with no protocol changes.
 
 ```
 Electron main process (CommonJS)
+ ├─ BrowserWindow opens immediately on the local boot page src/boot.html
+ │           (no backend awaited first)
  ├─ spawn → node lib/bin.js web --port 0   (staged registry backend; or the
  │           source CLI of $DSH_SOURCE_REPO via tsx)
  │           └─ reads "dsh web: http://127.0.0.1:<port>" from stdout
  ├─ health-poll GET / until 200
- └─ BrowserWindow.loadURL(http://127.0.0.1:<port>/)   ← same-origin HTTP + WS
+ └─ on success loadURL(http://127.0.0.1:<port>/)   ← same-origin HTTP + WS
 ```
+
+Boot progress streams to the boot page over IPC. Any failed step (missing
+Node, backend exit, health-check timeout) shows the error, the backend's
+stderr tail, and a retry button in the window instead of quitting; a backend
+crash while the UI is up returns to the boot page the same way.
 
 The Web UI is served by its own backend and is same-origin with it, so the
 desktop shell reuses the entire HTTP/WebSocket transport and trust perimeter.

@@ -2,11 +2,14 @@
 /**
  * Electron main process for the DeepSeek Harness desktop shell.
  *
- * The shell spawns the `dsh web` backend (node:http on a loopback port chosen
- * by the OS via `--port 0`), reads the printed readiness URL from stdout, then
- * loads it in a BrowserWindow. The Web UI is same-origin with its backend, so
- * the full HTTP + WebSocket transport and trust perimeter are reused with no
- * protocol changes.
+ * The window opens immediately on a local boot page (src/boot.html), then the
+ * `dsh web` backend (node:http on a loopback port chosen by the OS via
+ * `--port 0`) is spawned in the background. Boot progress streams to the page
+ * over IPC; on failure the page shows the error plus the backend's stderr tail
+ * and a retry button — the app never quits just because a boot step failed.
+ * Once the backend answers 200 on GET /, the window navigates to it. The Web
+ * UI is same-origin with its backend, so the full HTTP + WebSocket transport
+ * and trust perimeter are reused with no protocol changes.
  *
  * CommonJS is deliberate: the main process only needs `electron` plus Node
  * built-ins and never imports other packages, so staying CJS sidesteps
@@ -14,7 +17,7 @@
  */
 'use strict'
 
-const { app, BrowserWindow, shell, nativeTheme, ipcMain, dialog } = require('electron')
+const { app, BrowserWindow, shell, nativeTheme, ipcMain } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const http = require('node:http')
 const path = require('node:path')
@@ -30,12 +33,24 @@ const READY_RE = /http:\/\/127\.0\.0\.1:(\d+)/
 
 const HEALTH_TIMEOUT_MS = 30_000
 const HEALTH_INTERVAL_MS = 200
+/** Deadline for the backend to print its readiness URL after spawn. */
+const BACKSTART_TIMEOUT_MS = 60_000
+/** Backend stderr lines kept to render in the boot page's failure panel. */
+const STDERR_TAIL_LINES = 200
 
 /** @type {import('node:child_process').ChildProcess | null} */
 let backend = null
 /** @type {Electron.BrowserWindow | null} */
 let win = null
 let quitting = false
+/** attemptBoot() is in flight; suppresses concurrent (re)starts. */
+let starting = false
+/** 'boot' until the backend URL loads, 'app' while it shows, 'error' after a failed boot. */
+let phase = 'boot'
+/** Guard so the boot:ready signal from a reloaded boot page cannot start a second boot. */
+let bootStarted = false
+/** Ring buffer of recent backend stderr lines for error reporting. */
+const stderrTail = []
 /** Node executable resolved by checkNode(); backendSpec spawns this. */
 let nodeCmd = 'node'
 
@@ -48,6 +63,32 @@ ipcMain.on('win:toggle-maximize', () => {
   else win.maximize()
 })
 ipcMain.on('win:close', () => win?.close())
+
+// The boot page reports its status listener via preload.cjs's dshBoot bridge;
+// the first boot starts then, so no early status event is lost to the page
+// load race. Retries arrive on boot:retry.
+ipcMain.on('boot:ready', () => {
+  if (bootStarted) return
+  bootStarted = true
+  void attemptBoot()
+})
+ipcMain.on('boot:retry', () => {
+  if (phase !== 'error' || starting) return
+  void attemptBoot()
+})
+
+/**
+ * Push a boot status ({state: 'loading'|'error', message, detail?}) to the
+ * boot page. Silently drops it when no window can receive it.
+ * @param {{ state: 'loading' | 'error', message: string, detail?: string }} status
+ */
+function sendStatus (status) {
+  try {
+    win?.webContents.send('boot:status', status)
+  } catch {
+    // The window can be mid-teardown during status updates; dropping is fine.
+  }
+}
 
 /**
  * Resolve how to launch the backend. Packaged: run lib/bin.js from
@@ -180,7 +221,7 @@ function locateNode () {
 /**
  * Verify the user's Node satisfies the backend's minimum and remember the
  * resolved executable for backendSpec(). Returns an error message to surface
- * (and quit) or null when acceptable.
+ * on the boot page, or null when acceptable.
  * @returns {string | null}
  */
 function checkNode () {
@@ -196,14 +237,16 @@ function checkNode () {
 
 /**
  * Spawn the `dsh web` backend with an OS-assigned loopback port and resolve
- * once its readiness URL is printed.
+ * once its readiness URL is printed, or reject with the reason (including a
+ * deadline and the backend's own exit) otherwise. Stderr is mirrored to the
+ * console and kept in {@link stderrTail} for the boot page's failure panel.
  * @returns {Promise<number>} the resolved port
  */
 function startBackend () {
   return new Promise((resolve, reject) => {
     // Use the user's standalone Node (resolved by checkNode), not Electron's
     // bundled node, so the backend runs under a real, project-supported Node
-    // version.
+    // version. A throw from backendSpec() rejects this promise.
     const spec = backendSpec()
     backend = spawn(
       spec.cmd,
@@ -217,30 +260,50 @@ function startBackend () {
     )
 
     let settled = false
-    const fail = (msg) => {
-      if (!settled) {
-        settled = true
-        reject(new Error(msg))
-      }
+    let pendingStderr = ''
+    /** @type {NodeJS.Timeout | null} */
+    let timer = null
+    const settle = (settleFn, value) => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      settleFn(value)
     }
+    timer = setTimeout(
+      () => settle(reject, new Error(`backend did not report readiness within ${BACKSTART_TIMEOUT_MS / 1000}s`)),
+      BACKSTART_TIMEOUT_MS,
+    )
 
     const onStdout = (chunk) => {
       const text = chunk.toString()
       process.stdout.write(`[dsh] ${text}`)
-      if (settled) return
       const match = READY_RE.exec(text)
-      if (match) {
-        settled = true
-        resolve(Number(match[1]))
-      }
+      if (match) settle(resolve, Number(match[1]))
     }
     backend.stdout.on('data', onStdout)
-    backend.stderr.on('data', (chunk) => process.stderr.write(`[dsh] ${chunk}`))
+    backend.stderr.on('data', (chunk) => {
+      process.stderr.write(`[dsh] ${chunk}`)
+      // Keep whole lines only; the trailing partial stays buffered until the
+      // next chunk (a final partial line is dropped — cosmetic only).
+      pendingStderr += chunk
+      const lines = pendingStderr.split(/\r?\n/)
+      pendingStderr = lines.pop() ?? ''
+      for (const line of lines) {
+        stderrTail.push(line)
+        if (stderrTail.length > STDERR_TAIL_LINES) stderrTail.shift()
+      }
+    })
 
-    backend.on('error', (err) => fail(`failed to spawn backend: ${err.message}`))
+    backend.on('error', (err) => settle(reject, new Error(`failed to spawn backend: ${err.message}`)))
     backend.on('exit', (code) => {
-      if (!settled && !quitting) {
-        fail(`backend exited before becoming ready (code ${code})`)
+      if (!settled) {
+        if (!quitting) settle(reject, new Error(`backend exited before becoming ready (code ${code})`))
+        return
+      }
+      // A crash after the UI is up strands the renderer; route back to the
+      // boot page so the user can restart the backend without relaunching.
+      if (!quitting && phase === 'app') {
+        bootFailed(`后端进程意外退出 (code ${code})`)
       }
     })
   })
@@ -271,9 +334,10 @@ function waitForReady (port) {
 }
 
 /**
- * @param {number} port
+ * Open the shell window on the local boot page. The backend's URL is loaded
+ * later by attemptBoot(); until then the page shows boot progress.
  */
-function createWindow (port) {
+function createWindow () {
   win = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -291,7 +355,7 @@ function createWindow (port) {
   // Keep the renderer's maximize/restore button icon in sync.
   win.on('maximize', () => win?.webContents.send('win:maximize-changed', true))
   win.on('unmaximize', () => win?.webContents.send('win:maximize-changed', false))
-  win.loadURL(`http://127.0.0.1:${port}/`)
+  win.loadFile(path.join(__dirname, 'boot.html'))
 
   // Open external links in the user's browser, never inside the shell.
   win.webContents.setWindowOpenHandler(({ url }) => {
@@ -308,9 +372,8 @@ function createWindow (port) {
 /**
  * Kill the backend process tree across platforms without external deps.
  */
-function killBackend () {
+function stopBackend () {
   if (!backend) return
-  quitting = true
   try {
     if (process.platform === 'win32') {
       // `/T` kills the whole descendant tree.
@@ -334,17 +397,59 @@ function killBackend () {
   backend = null
 }
 
-async function boot () {
-  const nodeError = checkNode()
-  if (nodeError) {
-    await dialog.showMessageBox({ type: 'error', title: 'Node.js required', message: nodeError })
-    app.quit()
+/** App teardown flavor of {@link stopBackend}: also silences exit handling. */
+function killBackend () {
+  quitting = true
+  stopBackend()
+}
+
+/**
+ * Record a boot failure and surface it on the boot page with a retry button;
+ * the app stays open either way. When the SPA is showing (backend died after
+ * startup), navigate back to the boot page first and deliver the status once
+ * its listener is up.
+ * @param {string} message
+ */
+function bootFailed (message) {
+  stopBackend()
+  phase = 'error'
+  console.error('[desktop] startup failed:', message)
+  const status = { state: 'error', message, detail: stderrTail.join('\n').trim() }
+  if (win && !win.isDestroyed() && !win.webContents.getURL().startsWith('file:')) {
+    win.loadFile(path.join(__dirname, 'boot.html'))
+      .then(() => sendStatus(status))
+      .catch(() => sendStatus(status))
     return
   }
+  sendStatus(status)
+}
+
+/**
+ * One boot attempt: verify Node, spawn the backend, wait for its health, then
+ * navigate the window to it. Every failure lands in {@link bootFailed} (shown
+ * in-window with a retry), never an app quit.
+ */
+async function attemptBoot () {
+  if (starting) return
+  starting = true
   try {
+    phase = 'boot'
+    stderrTail.length = 0
+    stopBackend()
+
+    sendStatus({ state: 'loading', message: '正在检查 Node.js 运行环境…' })
+    const nodeError = checkNode()
+    if (nodeError) return bootFailed(nodeError)
+
+    sendStatus({ state: 'loading', message: '正在启动 DeepSeek Harness 后端…' })
     const port = await startBackend()
+
+    sendStatus({ state: 'loading', message: '正在等待后端服务就绪…' })
     await waitForReady(port)
-    createWindow(port)
+
+    if (!win || win.isDestroyed()) return
+    phase = 'app'
+    await win.loadURL(`http://127.0.0.1:${port}/`)
     // Expose this install's backend as the `dsh` CLI: rewrite the ~/.dsh/bin
     // shims (they track this install dir, so upgrades self-heal) and repair
     // the user PATH entry. Fire-and-forget: the CLI is a convenience, never
@@ -354,10 +459,15 @@ async function boot () {
         .catch((err) => console.error('[desktop] dsh CLI shim refresh failed:', err.message))
     }
   } catch (err) {
-    console.error('[desktop] startup failed:', err.message)
-    killBackend()
-    app.quit()
+    bootFailed(err?.message ?? String(err))
+  } finally {
+    starting = false
   }
+}
+
+/** Open the window at once; the backend boot starts once the boot page signals ready. */
+async function boot () {
+  createWindow()
 }
 
 app.whenReady().then(boot)

@@ -8,12 +8,15 @@ DeepSeek Harness 的 Electron 桌面外壳。它把发布的 `dsh web` 后端启
 
 ```
 Electron main process (CommonJS)
- ├─ spawn → node lib/bin.js web --port 0   (staged registry backend; or the
+ ├─ BrowserWindow 立即打开本地启动页 src/boot.html(不等任何后端)
+ ├─ 后台 spawn → node lib/bin.js web --port 0   (staged registry backend; or the
  │           source CLI of $DSH_SOURCE_REPO via tsx)
  │           └─ reads "dsh web: http://127.0.0.1:<port>" from stdout
  ├─ health-poll GET / until 200
- └─ BrowserWindow.loadURL(http://127.0.0.1:<port>/)   ← same-origin HTTP + WS
+ └─ 成功后 loadURL(http://127.0.0.1:<port>/)   ← same-origin HTTP + WS
 ```
+
+启动进度通过 IPC 实时推送到启动页;任一步失败(Node 缺失、后端退出、健康检查超时),启动页会显示错误、后端 stderr 尾部和一个"重试"按钮,应用不会退出。UI 运行期间后端崩溃也会回到启动页等待重试。
 
 Web UI 由它自己的后端托管、与后端同源，所以桌面外壳原样复用整套 HTTP/WebSocket 传输层与信任围栏。
 

@@ -12,7 +12,20 @@
  */
 'use strict'
 
-const { ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer } = require('electron')
+
+// Boot-status bridge between the local boot page (src/boot.html) and the main
+// process. Exposed on every page the shell loads; the dsh web UI never calls
+// it, and the boot page needs it because sandbox + contextIsolation keep
+// ipcRenderer away from page scripts.
+contextBridge.exposeInMainWorld('dshBoot', {
+  /** Report the boot page's listener attached so the main process can start the boot without losing early status events. */
+  ready: () => ipcRenderer.send('boot:ready'),
+  /** Subscribe to boot status updates ({state: 'loading'|'error', message, detail?}). */
+  onStatus: (listener) => ipcRenderer.on('boot:status', (_event, status) => { listener(status) }),
+  /** Ask the main process to retry the backend boot after a failure. */
+  retry: () => ipcRenderer.send('boot:retry'),
+})
 
 const TITLEBAR_HEIGHT = 36
 
