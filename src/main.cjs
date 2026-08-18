@@ -343,8 +343,10 @@ function startBackend () {
         if (!quitting) settle(reject, new Error(`backend exited before becoming ready (code ${code})`))
         return
       }
-      // A crash after the UI is up strands the renderer; route back to the
-      // boot page so the user can restart the backend without relaunching.
+      // An exit between the readiness URL and the health poll is rejected by
+      // waitForReady's own exit listener. A crash after the UI is up strands
+      // the renderer; route back to the boot page so the user can restart
+      // the backend without relaunching.
       if (!quitting && phase === 'app') {
         bootFailed(`后端进程意外退出 (code ${code})`)
       }
@@ -353,22 +355,41 @@ function startBackend () {
 }
 
 /**
- * Poll `GET /` until it answers 200, or reject once the deadline passes.
+ * Poll `GET /` until it answers 200, or reject once the deadline passes. A
+ * backend that dies mid-poll (readiness URL printed, UI never served)
+ * rejects at once with its exit code instead of grinding to the deadline.
  * @param {number} port
  * @returns {Promise<void>}
  */
 function waitForReady (port) {
+  const child = backend
   const deadline = Date.now() + HEALTH_TIMEOUT_MS
   return new Promise((resolve, reject) => {
+    let done = false
+    const settle = (settleFn, value) => {
+      if (done) return
+      done = true
+      child?.removeListener('exit', onExit)
+      settleFn(value)
+    }
+    /** @param {number | null} code */
+    const onExit = (code) => settle(reject, new Error(`backend exited before serving the UI (code ${code})`))
+    // exitCode/signalCode are set the moment the child is reaped, closing the
+    // race between startBackend() resolving and the listener attaching.
+    if (!child || child.exitCode !== null || child.signalCode !== null) {
+      onExit(child?.exitCode ?? null)
+      return
+    }
+    child.on('exit', onExit)
     const tick = () => {
       const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
         res.resume()
-        if (res.statusCode === 200) return resolve()
-        if (Date.now() > deadline) return reject(new Error('backend did not return 200 in time'))
+        if (res.statusCode === 200) return settle(resolve)
+        if (Date.now() > deadline) return settle(reject, new Error('backend did not return 200 in time'))
         setTimeout(tick, HEALTH_INTERVAL_MS)
       })
       req.on('error', () => {
-        if (Date.now() > deadline) return reject(new Error('backend unreachable before deadline'))
+        if (Date.now() > deadline) return settle(reject, new Error('backend unreachable before deadline'))
         setTimeout(tick, HEALTH_INTERVAL_MS)
       })
     }
