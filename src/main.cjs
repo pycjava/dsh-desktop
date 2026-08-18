@@ -26,11 +26,18 @@ const http = require('node:http')
 const path = require('node:path')
 const fs = require('node:fs')
 const { ensureCliShim } = require('./ensure-cli-shim.cjs')
+const { ensureDesktopPlugins } = require('./ensure-desktop-plugins.cjs')
 
 /** Repository root (this file lives at src/main.cjs). */
 const ROOT = path.resolve(__dirname, '..')
 /** Registry backend staged by `pnpm run backend` (scripts/build-desktop-backend.mjs). */
 const STAGED_BACKEND = path.join(ROOT, 'dist-desktop', 'backend')
+/** Backend closure directory the current boot uses for desktop plugin seeding. */
+function desktopBackendRoot () {
+  if (app.isPackaged) return path.join(process.resourcesPath, 'backend')
+  return STAGED_BACKEND
+}
+
 /** Matches the `dsh web: http://127.0.0.1:<port>` readiness line. */
 const READY_RE = /http:\/\/127\.0\.0\.1:(\d+)/
 
@@ -476,6 +483,11 @@ async function attemptBoot () {
     sendStatus({ state: 'loading', message: '正在检查 Node.js 运行环境…' })
     const nodeError = checkNode()
     if (nodeError) return bootFailed(nodeError)
+
+    if (!process.env.DSH_SOURCE_REPO) {
+      sendStatus({ state: 'loading', message: '正在启用内置插件…' })
+      ensureDesktopPlugins(desktopBackendRoot())
+    }
 
     sendStatus({ state: 'loading', message: '正在启动 DeepSeek Harness 后端…' })
     const port = await startBackend()

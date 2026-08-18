@@ -115,6 +115,19 @@ the backend is deliberate: bump the pin in `backend/package.json`, regenerate
 the lockfile, ship a new installer. Upgrading the bundled Node is the same
 ritual on `NODE_VERSION`.
 
+### Bundled plugins
+
+The desktop installers enable four dsh plugins by default:
+
+- `dsh-fusion` (dsh-preset)
+- `@liustack/modlens`
+- `dsh-usage-ledger`
+- `dsh-git-tree`
+
+They are packaged as dependencies of the backend closure under `resources/backend`. On first launch the Electron main process reads `backend/desktop-plugins.json` and appends the listed bundles to `$DSH_HOME/profiles/web`, so end users do not need pnpm or a manual `dsh plugin add`.
+
+Keep these three places in sync when updating plugins: `plugins/` tarballs, `backend/package.json`, and `backend/desktop-plugins.json`.
+
 ## Notes
 
 - The backend is the published `@deepseek-ai/dsh` from npm; a released

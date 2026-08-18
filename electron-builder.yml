@@ -8,6 +8,7 @@ directories:
 files:
   - src/main.cjs
   - src/ensure-cli-shim.cjs
+  - src/ensure-desktop-plugins.cjs
   - src/preload.cjs
   - src/boot.html
   - package.json

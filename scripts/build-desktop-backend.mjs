@@ -14,8 +14,8 @@
  * pre-installed Node. Output: dist-desktop/backend + dist-desktop/node-runtime.
  *
  * Pipeline: npm ci (target os/cpu, scripts ignored) -> promote CLI package ->
- * assert frontend dist -> prune runtime-dead files and non-target binaries ->
- * assert target binaries -> stage the bundled Node runtime -> verify the
+ * assert frontend dist -> assert desktop plugins -> prune runtime-dead files and
+ * non-target binaries -> assert target binaries -> stage the bundled Node runtime -> verify the
  * standalone run under that exact runtime with a fresh DSH_HOME (native
  * platform only).
  *
@@ -104,7 +104,12 @@ async function installStaging(platform, arch) {
   }
   console.log(`build-desktop-backend: clearing ${STAGING}`)
   await rm(STAGING, { recursive: true, force: true })
-  for (const file of ['package.json', 'package-lock.json']) {
+  const pluginsSrc = resolve(root, 'plugins')
+  const stagedPlugins = resolve(root, 'dist-desktop', 'plugins')
+  await rm(stagedPlugins, { recursive: true, force: true })
+  await mkdir(resolve(root, 'dist-desktop'), { recursive: true })
+  if (existsSync(pluginsSrc)) await cp(pluginsSrc, stagedPlugins, { recursive: true })
+  for (const file of ['package.json', 'package-lock.json', 'desktop-plugins.json']) {
     await cp(join(MANIFEST_DIR, file), join(STAGING, file))
   }
   await run('install', npmBin(), [
@@ -139,6 +144,31 @@ async function assertFrontendDist() {
     throw new Error(`frontend dist missing at ${FRONTEND_DIST}; registry closure incomplete`)
   }
   console.log('build-desktop-backend: frontend dist present in closure')
+}
+
+/**
+ * Fail loud when a desktop-bundled plugin is missing or no longer declares a
+ * dsh bundle patch. The desktop shell relies on these packages being present
+ * in the backend closure and listed in backend/desktop-plugins.json.
+ */
+async function assertDesktopPlugins() {
+  const manifest = JSON.parse(await readFile(join(STAGING, 'desktop-plugins.json'), 'utf8'))
+  const bundles = manifest.bundles
+  if (!Array.isArray(bundles) || bundles.length === 0) {
+    throw new Error('desktop-plugins.json must list at least one bundle')
+  }
+  for (const packageName of bundles) {
+    const packageDir = join(STAGING, 'node_modules', ...packageName.split('/'))
+    const manifestPath = join(packageDir, 'package.json')
+    if (!existsSync(manifestPath)) {
+      throw new Error(`desktop plugin ${JSON.stringify(packageName)} missing at ${manifestPath}; npm ci did not stage the plugin closure`)
+    }
+    const plugin = JSON.parse(await readFile(manifestPath, 'utf8'))
+    if (!plugin.dsh?.bundle?.patch) {
+      throw new Error(`desktop plugin ${JSON.stringify(packageName)} declares no dsh.bundle.patch in its package.json`)
+    }
+    console.log(`build-desktop-backend: desktop plugin ${packageName} staged (${plugin.version ?? 'unknown'})`)
+  }
 }
 
 /** Windows-version-scoped binary dirs, e.g. node-pty's conpty `win10-arm64`. */
@@ -501,6 +531,7 @@ async function main() {
   await installStaging(platform, arch)
   await promoteCliPackage()
   await assertFrontendDist()
+  await assertDesktopPlugins()
   await pruneRuntimeDeadWeight(platform, arch)
   assertTargetBinaries(platform, arch)
   if (platform === 'darwin') await ensureDarwinHelperExecutable(arch)
