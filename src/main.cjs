@@ -4,7 +4,10 @@
  *
  * The window opens immediately on a local boot page (src/boot.html), then the
  * `dsh web` backend (node:http on a loopback port chosen by the OS via
- * `--port 0`) is spawned in the background. Boot progress streams to the page
+ * `--port 0`) is spawned in the background under the standalone Node runtime
+ * bundled at resources/node (a DSH_NODE override or a PATH node are
+ * fallbacks) — never Electron's embedded node, which the backend's addons
+ * cannot run under. Boot progress streams to the page
  * over IPC; on failure the page shows the error plus the backend's stderr tail
  * and a retry button — the app never quits just because a boot step failed.
  * Once the backend answers 200 on GET /, the window navigates to it. The Web
@@ -92,7 +95,8 @@ function sendStatus (status) {
 
 /**
  * Resolve how to launch the backend. Packaged: run lib/bin.js from
- * resources/backend under the user's Node. Dev: with `DSH_SOURCE_REPO` set,
+ * resources/backend under the Node bundled at resources/node (resolved by
+ * checkNode). Dev: with `DSH_SOURCE_REPO` set,
  * run that dsh checkout's source CLI via tsx (debugging harness changes);
  * otherwise run the staged registry backend — the exact closure the installer
  * ships.
@@ -119,6 +123,19 @@ function backendSpec () {
 }
 
 const MIN_NODE_MAJOR = 22
+
+/**
+ * Path to the standalone Node bundled at resources/node by the installer
+ * (dist-desktop/node-runtime staged by scripts/build-desktop-backend.mjs);
+ * null in dev. The backend must run under a real Node build, never
+ * Electron's embedded node: its node-addon-require-builtin addon (HMR)
+ * needs V8 embedder slots Electron does not provide.
+ * @returns {string | null}
+ */
+function bundledNodePath () {
+  if (!app.isPackaged) return null
+  return path.join(process.resourcesPath, 'node', process.platform === 'win32' ? 'node.exe' : 'node')
+}
 
 /** Common standalone Node locations for macOS GUI apps, checked when plain
  * `node` is not on the GUI PATH (Finder-launched apps don't inherit the shell
@@ -179,8 +196,10 @@ function nodeFromLoginShell () {
 
 /**
  * Locate a runnable standalone Node. `DSH_NODE` is an explicit override;
- * otherwise `node` on PATH wins (previous behavior), then macOS-only standard
- * locations, then the login shell PATH.
+ * otherwise the bundled runtime (packaged builds) wins, then `node` on PATH,
+ * then macOS-only standard locations, then the login shell PATH. The bundled
+ * runtime failing to run (corrupt install) falls through to the same chain
+ * instead of hard-failing, so a user-installed Node can still rescue boot.
  * @returns {{ cmd: string | null, version: string | null, error: string | null }}
  */
 function locateNode () {
@@ -193,6 +212,13 @@ function locateNode () {
       version: null,
       error: `DSH_NODE points at ${explicit}, but that node binary could not be run.`,
     }
+  }
+
+  const bundled = bundledNodePath()
+  if (bundled) {
+    const version = nodeVersion(bundled)
+    if (version) return { cmd: bundled, version, error: null }
+    console.error(`[desktop] bundled Node at ${bundled} could not be run; falling back to PATH lookup`)
   }
 
   const pathVersion = nodeVersion('node')
@@ -211,6 +237,13 @@ function locateNode () {
     }
   }
 
+  if (app.isPackaged) {
+    return {
+      cmd: null,
+      version: null,
+      error: `The bundled Node runtime is missing or unusable (expected at ${bundled ?? 'resources/node'}). Reinstall DeepSeek Harness, or set DSH_NODE to a Node.js >= 22.19 binary as a workaround.`,
+    }
+  }
   return {
     cmd: null,
     version: null,
@@ -219,9 +252,10 @@ function locateNode () {
 }
 
 /**
- * Verify the user's Node satisfies the backend's minimum and remember the
- * resolved executable for backendSpec(). Returns an error message to surface
- * on the boot page, or null when acceptable.
+ * Verify the resolved Node satisfies the backend's minimum (the bundled
+ * runtime ships a pinned current LTS, so this gate mostly protects PATH /
+ * DSH_NODE fallbacks) and remember the executable for backendSpec(). Returns
+ * an error message to surface on the boot page, or null when acceptable.
  * @returns {string | null}
  */
 function checkNode () {
@@ -244,9 +278,11 @@ function checkNode () {
  */
 function startBackend () {
   return new Promise((resolve, reject) => {
-    // Use the user's standalone Node (resolved by checkNode), not Electron's
-    // bundled node, so the backend runs under a real, project-supported Node
-    // version. A throw from backendSpec() rejects this promise.
+    // Use the standalone Node resolved by checkNode() — the bundled runtime,
+    // a DSH_NODE override, or PATH node — and never Electron's embedded node:
+    // node-addon-require-builtin (the backend's HMR internals bridge) cannot
+    // run under Electron's V8 embedder configuration. A throw from
+    // backendSpec() rejects this promise.
     const spec = backendSpec()
     backend = spawn(
       spec.cmd,

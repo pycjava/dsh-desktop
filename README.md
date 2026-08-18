@@ -12,8 +12,9 @@ so the full agent runtime and UI run locally with no protocol changes.
 Electron main process (CommonJS)
  ├─ BrowserWindow opens immediately on the local boot page src/boot.html
  │           (no backend awaited first)
- ├─ spawn → node lib/bin.js web --port 0   (staged registry backend; or the
- │           source CLI of $DSH_SOURCE_REPO via tsx)
+ ├─ spawn → node lib/bin.js web --port 0   (staged registry backend under the
+ │           bundled standalone Node; or the source CLI of $DSH_SOURCE_REPO
+ │           via tsx)
  │           └─ reads "dsh web: http://127.0.0.1:<port>" from stdout
  ├─ health-poll GET / until 200
  └─ on success loadURL(http://127.0.0.1:<port>/)   ← same-origin HTTP + WS
@@ -29,13 +30,19 @@ desktop shell reuses the entire HTTP/WebSocket transport and trust perimeter.
 
 ## Prerequisites
 
-- Node.js >= 22.19 on PATH (the backend runs under the user's standalone Node,
-  not Electron's bundled one).
-- `pnpm install`
+- Building/running from source: Node.js >= 22.19 and `pnpm install`.
+- End users need nothing else: the installer bundles a pinned standalone Node
+  runtime at `resources/node` (staged by the backend build from official
+  nodejs.org archives, checksum-verified), and the backend, the `dsh` CLI
+  shims, and the Electron shell all run it. The backend cannot use
+  Electron's embedded Node — its `node-addon-require-builtin` addon (HMR)
+  needs V8 embedder slots Electron does not provide.
 
-macOS GUI apps do not inherit the shell PATH. The packaged app probes the
-standard Homebrew/MacPorts node locations and the login shell; set
-`DSH_NODE=/absolute/path/to/node` to override that lookup explicitly.
+The bundled runtime is only a convenience, not a lock: set
+`DSH_NODE=/absolute/path/to/node` to force a specific Node binary (it wins
+over the bundled one), or delete `resources/node` to fall back to `node` from
+PATH. On macOS GUI launches, the fallback chain also probes the standard
+Homebrew/MacPorts node locations and the login shell.
 
 ## Run
 
@@ -97,8 +104,16 @@ cnoke postinstall builds from source when allowed and fails on a cross-arch
 host, while the prebuilt leaves make every install script in the closure
 unnecessary. Cross-platform/arch builds skip the spawn-and-poll self-check
 (target addons cannot load under the host node); run each closure's self-check
-on matching native hardware. Upgrading the backend is deliberate: bump the pin
-in `backend/package.json`, regenerate the lockfile, ship a new installer.
+on matching native hardware. The same script stages the bundled Node runtime
+(`NODE_VERSION` pin in `scripts/build-desktop-backend.mjs`): it downloads the
+official archive from nodejs.org — `DSH_NODE_DIST_MIRROR` overrides the base
+URL — verifies it against the published `SHASUMS256.txt`, caches it under
+`dist-desktop/cache/`, and ships just the node binary (no npm/corepack) as
+`resources/node`. The self-check runs the closure under that exact runtime
+with a throwaway `DSH_HOME`, mirroring a fresh user's first launch. Upgrading
+the backend is deliberate: bump the pin in `backend/package.json`, regenerate
+the lockfile, ship a new installer. Upgrading the bundled Node is the same
+ritual on `NODE_VERSION`.
 
 ## Notes
 

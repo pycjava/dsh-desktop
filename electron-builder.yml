@@ -31,10 +31,16 @@ extraResources:
   # and the app's launch-time self-heal (src/ensure-cli-shim.cjs).
   - from: build/cli
     to: cli
+  # Standalone Node runtime (official binaries, checksum-pinned by scripts/
+  # build-desktop-backend.mjs) the backend and dsh CLI shims run under, so no
+  # user-installed Node is required. Only the binary ships — no npm/corepack.
+  - from: dist-desktop/node-runtime
+    to: node
 asar: true
-# Do NOT rebuild native modules for Electron's ABI: the backend runs under the
-# user's standalone Node, not Electron's. Keeping extraResources untouched
-# preserves the Node ABI the prebuilt addons were built against.
+# Do NOT rebuild native modules for Electron's ABI: the backend runs under
+# the bundled standalone Node (resources/node), not Electron's. Keeping
+# extraResources untouched preserves the Node ABI the prebuilt addons were
+# built against.
 nodeGypRebuild: false
 npmRebuild: false
 # Arch comes from the invoking CLI flag (--x64 / --arm64; scripts/

@@ -9,11 +9,15 @@
  * to the staging root — the layout the desktop shell launches: `node
  * lib/bin.js` with `node_modules` beside it — prunes what the backend never
  * loads, asserts the target platform's binaries, and verifies the standalone
- * run when the host matches the target. Output: dist-desktop/backend.
+ * run when the host matches the target. It also stages the pinned standalone
+ * Node runtime the installer bundles (resources/node), so users never need a
+ * pre-installed Node. Output: dist-desktop/backend + dist-desktop/node-runtime.
  *
  * Pipeline: npm ci (target os/cpu, scripts ignored) -> promote CLI package ->
  * assert frontend dist -> prune runtime-dead files and non-target binaries ->
- * assert target binaries -> verify standalone run (native platform only).
+ * assert target binaries -> stage the bundled Node runtime -> verify the
+ * standalone run under that exact runtime with a fresh DSH_HOME (native
+ * platform only).
  *
  * Install-time platform filtering stages only the target's platform-optional
  * leaves (sharp's `@img/*` and koffi's `@koromix/*` declare os/cpu). node-pty
@@ -24,10 +28,14 @@
  * unnecessary.
  */
 import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import http from 'node:http'
-import { existsSync, statSync } from 'node:fs'
-import { chmod, cp, readdir, rm, rmdir } from 'node:fs/promises'
+import { createReadStream, createWriteStream, existsSync, statSync } from 'node:fs'
+import { chmod, cp, mkdir, mkdtemp, readdir, readFile, rm, rmdir, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join, resolve, dirname, sep } from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -36,6 +44,19 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const MANIFEST_DIR = resolve(root, 'backend')
 /** Flat closure output directory. */
 const STAGING = resolve(root, 'dist-desktop', 'backend')
+/** Bundled standalone Node runtime output (extraResources `node`), one binary. */
+const NODE_STAGING = resolve(root, 'dist-desktop', 'node-runtime')
+/**
+ * Official Node the installer bundles so the backend never depends on a
+ * user-installed Node. The backend's closure (notably HMR's
+ * node-addon-require-builtin) requires a real Node build: it refuses to run
+ * under Electron's embedded Node, so a separate runtime must ship.
+ */
+const NODE_VERSION = '24.19.0'
+/** Mirror override for nodejs.org/dist (e.g. corporate or regional mirrors). */
+const NODE_DIST_BASE = (process.env.DSH_NODE_DIST_MIRROR || 'https://nodejs.org/dist').replace(/\/+$/, '')
+/** Archive cache so repeat builds re-fetch nothing; hash-verified on every use. */
+const NODE_CACHE = resolve(root, 'dist-desktop', 'cache')
 /** Backend entry, at the staging root after the CLI package is promoted. */
 const ENTRY = join('lib', 'bin.js')
 /** Registry package the promoted CLI is copied from. */
@@ -193,8 +214,10 @@ async function pruneRuntimeDeadWeight(platform, arch) {
 function assertTargetBinaries(platform, arch) {
   const target = `${platform}-${arch}`
   const ptyDir = join(STAGING, 'node_modules', 'node-pty', 'prebuilds', target)
+  // node-pty 1.2.0-beta.15 (pulled in by @deepseek-ai/dsh rc.7) dropped the
+  // legacy win32 pty.node/winpty prebuilds and ships ConPTY only.
   const ptyAddons = platform === 'win32'
-    ? ['pty.node', 'conpty.node', 'conpty_console_list.node']
+    ? ['conpty.node', 'conpty_console_list.node']
     : ['pty.node', 'spawn-helper']
   for (const addon of ptyAddons) {
     if (!existsSync(join(ptyDir, addon))) {
@@ -226,12 +249,138 @@ async function ensureDarwinHelperExecutable(arch) {
 }
 
 /**
+ * Run a short subprocess without a shell (args pass through CreateProcess /
+ * posix_spawn untouched, so paths with spaces need no quoting games) and
+ * report success plus captured stderr.
+ * @param {string} command
+ * @param {string[]} args
+ * @returns {Promise<{ ok: boolean, why: string }>}
+ */
+function execOk(command, args) {
+  return new Promise((resolveP) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr?.on('data', (chunk) => { stderr += chunk })
+    child.once('error', (err) => resolveP({ ok: false, why: err.message }))
+    child.once('exit', (code) => resolveP({ ok: code === 0, why: code === 0 ? '' : stderr.trim() || `exit ${code}` }))
+  })
+}
+
+/** @param {string} file @returns {Promise<string>} hex sha256 */
+async function sha256(file) {
+  const hash = createHash('sha256')
+  for await (const chunk of createReadStream(file)) hash.update(chunk)
+  return hash.digest('hex')
+}
+
+/** @param {string} url @param {string} dest */
+async function download(url, dest) {
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status} for ${url}`)
+  await pipeline(Readable.fromWeb(res.body), createWriteStream(dest))
+}
+
+/** Recursive first match by file name; the archives' inner layout is a
+ * version property, not an interface, so search instead of hardcoding paths.
+ * @param {string} dir @param {string} name @returns {Promise<string | null>} */
+async function findFile(dir, name) {
+  for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    const p = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      const hit = await findFile(p, name)
+      if (hit) return hit
+    } else if (entry.name === name) {
+      return p
+    }
+  }
+  return null
+}
+
+/**
+ * Expected sha256 for a nodejs.org archive, from the version's cached
+ * SHASUMS256.txt (fetched once per version).
+ * @param {string} fileName
+ * @returns {Promise<string>}
+ */
+async function expectedChecksum(fileName) {
+  const sumsFile = join(NODE_CACHE, `SHASUMS256.txt.v${NODE_VERSION}`)
+  let text
+  try {
+    text = await readFile(sumsFile, 'utf8')
+  } catch {
+    const res = await fetch(`${NODE_DIST_BASE}/v${NODE_VERSION}/SHASUMS256.txt`)
+    if (!res.ok) throw new Error(`fetching SHASUMS256.txt failed: HTTP ${res.status}`)
+    text = await res.text()
+    await writeFile(sumsFile, text)
+  }
+  const sum = text.split(/\r?\n/).find((line) => line.endsWith(` ${fileName}`))?.split(/\s+/)[0]
+  if (!/^[0-9a-f]{64}$/.test(sum ?? '')) throw new Error(`SHASUMS256.txt has no entry for ${fileName}`)
+  return sum
+}
+
+/**
+ * Stage the bundled Node runtime for one target: download the official
+ * archive (cache hit when the hash still matches), verify it against
+ * SHASUMS256.txt, extract, and copy just the node binary to
+ * dist-desktop/node-runtime — the whole content the installer ships at
+ * resources/node. npm, corepack, headers and docs stay out: the backend
+ * closure is preinstalled, so nothing but the binary is ever executed.
+ * @param {string} platform target OS (`win32` | `darwin`)
+ * @param {string} arch target CPU architecture
+ */
+async function stageNodeRuntime(platform, arch) {
+  const archiveName = platform === 'win32'
+    ? `node-v${NODE_VERSION}-win-${arch}.zip`
+    : `node-v${NODE_VERSION}-darwin-${arch}.tar.gz`
+  const binaryName = platform === 'win32' ? 'node.exe' : 'node'
+  await mkdir(NODE_CACHE, { recursive: true })
+  const archive = join(NODE_CACHE, archiveName)
+  const expected = await expectedChecksum(archiveName)
+  if (!existsSync(archive) || await sha256(archive) !== expected) {
+    console.log(`build-desktop-backend: downloading node v${NODE_VERSION} ${platform}-${arch} (${NODE_DIST_BASE})`)
+    const part = `${archive}.part`
+    await download(`${NODE_DIST_BASE}/v${NODE_VERSION}/${archiveName}`, part)
+    const got = await sha256(part)
+    if (got !== expected) throw new Error(`node archive checksum mismatch for ${archiveName}: expected ${expected}, got ${got}`)
+    await rm(archive, { force: true })
+    await cp(part, archive)
+    await rm(part, { force: true })
+  } else {
+    console.log(`build-desktop-backend: node v${NODE_VERSION} ${platform}-${arch} archive cached`)
+  }
+
+  const extractDir = await mkdtemp(join(tmpdir(), 'dsh-node-extract-'))
+  try {
+    const extraction = archiveName.endsWith('.zip')
+      ? (process.platform === 'win32'
+        ? execOk('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+          `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${extractDir}' -Force`])
+        : execOk('tar', ['-xf', archive, '-C', extractDir]))
+      : execOk('tar', ['-xzf', archive, '-C', extractDir])
+    const { ok, why } = await extraction
+    if (!ok) throw new Error(`extracting ${archiveName} failed: ${why}`)
+    const binary = await findFile(extractDir, binaryName)
+    if (!binary) throw new Error(`extracted ${archiveName} contains no ${binaryName}`)
+    await rm(NODE_STAGING, { recursive: true, force: true })
+    await mkdir(NODE_STAGING, { recursive: true })
+    await cp(binary, join(NODE_STAGING, binaryName))
+    if (platform === 'darwin') await chmod(join(NODE_STAGING, binaryName), 0o755)
+    console.log(`build-desktop-backend: staged bundled node v${NODE_VERSION} (${(statSync(join(NODE_STAGING, binaryName)).size / 1e6).toFixed(1)} MB) at ${NODE_STAGING}`)
+  } finally {
+    await rm(extractDir, { recursive: true, force: true })
+  }
+}
+
+/**
  * Spawn the staged backend and confirm it serves the UI (HTTP 200) on a
  * loopback port. This is the go/no-go check for the whole packaging route.
  * Cross-platform/arch builds skip it: the boot path dlopens target-arch
  * addons (koffi backs JSONL durability from first write), which cannot load
  * under a host node of another platform/architecture; assertTargetBinaries
- * covers those builds.
+ * covers those builds. The run uses the exact bundled runtime the installer
+ * ships (never the host's node) and a throwaway DSH_HOME: a fresh user
+ * machine has no ~/.dsh, and the developer's own profiles can pull in
+ * plugins that mask what the installer actually ships.
  * @param {string} platform target OS (`win32` | `darwin`)
  * @param {string} arch target CPU architecture
  */
@@ -242,47 +391,55 @@ async function verifyRun(platform, arch) {
   }
   const entry = join(STAGING, ENTRY)
   if (!existsSync(entry)) throw new Error(`entry ${entry} missing after install`)
-  console.log('build-desktop-backend: verifying standalone run...')
+  const nodeBin = join(NODE_STAGING, platform === 'win32' ? 'node.exe' : 'node')
+  if (!existsSync(nodeBin)) throw new Error(`bundled node runtime missing at ${nodeBin}`)
+  console.log('build-desktop-backend: verifying standalone run under the bundled node...')
   const READY = /http:\/\/127\.0\.0\.1:(\d+)/
-  await new Promise((resolveP, rejectP) => {
-    const child = spawn(process.execPath, [entry, 'web', '--port', '0'], {
-      cwd: STAGING, stdio: ['ignore', 'pipe', 'inherit'],
-    })
-    let settled = false
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true
-        child.kill('SIGTERM')
-        rejectP(new Error('backend did not become ready in 90s'))
-      }
-    }, 90_000)
-    child.stdout.on('data', (chunk) => {
-      process.stdout.write(`[verify] ${chunk}`)
-      if (settled) return
-      const m = READY.exec(String(chunk))
-      if (!m) return
-      const port = Number(m[1])
-      poll(port).then(() => {
-        settled = true
-        clearTimeout(timer)
-        child.kill('SIGTERM')
-        console.log(`build-desktop-backend: OK — backend served UI on :${port}`)
-        resolveP()
-      }).catch((err) => {
-        settled = true
-        clearTimeout(timer)
-        child.kill('SIGTERM')
-        rejectP(err)
+  const home = await mkdtemp(join(tmpdir(), 'dsh-verify-home-'))
+  try {
+    await new Promise((resolveP, rejectP) => {
+      const child = spawn(nodeBin, [entry, 'web', '--port', '0'], {
+        cwd: STAGING, stdio: ['ignore', 'pipe', 'inherit'],
+        env: { ...process.env, DSH_HOME: home },
+      })
+      let settled = false
+      const timer = setTimeout(() => {
+        if (!settled) {
+          settled = true
+          child.kill('SIGTERM')
+          rejectP(new Error('backend did not become ready in 90s'))
+        }
+      }, 90_000)
+      child.stdout.on('data', (chunk) => {
+        process.stdout.write(`[verify] ${chunk}`)
+        if (settled) return
+        const m = READY.exec(String(chunk))
+        if (!m) return
+        const port = Number(m[1])
+        poll(port).then(() => {
+          settled = true
+          clearTimeout(timer)
+          child.kill('SIGTERM')
+          console.log(`build-desktop-backend: OK — backend served UI on :${port}`)
+          resolveP()
+        }).catch((err) => {
+          settled = true
+          clearTimeout(timer)
+          child.kill('SIGTERM')
+          rejectP(err)
+        })
+      })
+      child.on('exit', (code) => {
+        if (!settled) {
+          settled = true
+          clearTimeout(timer)
+          rejectP(new Error(`backend exited before ready (code ${code})`))
+        }
       })
     })
-    child.on('exit', (code) => {
-      if (!settled) {
-        settled = true
-        clearTimeout(timer)
-        rejectP(new Error(`backend exited before ready (code ${code})`))
-      }
-    })
-  })
+  } finally {
+    await rm(home, { recursive: true, force: true })
+  }
 }
 
 /** Poll GET / until 200 or the deadline. */
@@ -319,6 +476,8 @@ async function countFiles(dir) {
 function report() {
   const entry = join(STAGING, ENTRY)
   console.log(`build-desktop-backend: staging at ${STAGING} (entry ${statSync(entry).size} bytes)`)
+  const nodeBin = join(NODE_STAGING, process.platform === 'win32' ? 'node.exe' : 'node')
+  if (existsSync(nodeBin)) console.log(`build-desktop-backend: bundled node v${NODE_VERSION} at ${nodeBin}`)
 }
 
 async function main() {
@@ -345,6 +504,7 @@ async function main() {
   await pruneRuntimeDeadWeight(platform, arch)
   assertTargetBinaries(platform, arch)
   if (platform === 'darwin') await ensureDarwinHelperExecutable(arch)
+  await stageNodeRuntime(platform, arch)
   await verifyRun(platform, arch)
   report()
   console.log(`build-desktop-backend: closure file count: ${await countFiles(STAGING)}`)

@@ -9,8 +9,8 @@ DeepSeek Harness 的 Electron 桌面外壳。它把发布的 `dsh web` 后端启
 ```
 Electron main process (CommonJS)
  ├─ BrowserWindow 立即打开本地启动页 src/boot.html(不等任何后端)
- ├─ 后台 spawn → node lib/bin.js web --port 0   (staged registry backend; or the
- │           source CLI of $DSH_SOURCE_REPO via tsx)
+ ├─ 后台 spawn → node lib/bin.js web --port 0   (staged registry backend,跑在
+ │           内置的独立 Node 下;或经 tsx 启动 $DSH_SOURCE_REPO 的源码 CLI)
  │           └─ reads "dsh web: http://127.0.0.1:<port>" from stdout
  ├─ health-poll GET / until 200
  └─ 成功后 loadURL(http://127.0.0.1:<port>/)   ← same-origin HTTP + WS
@@ -22,10 +22,17 @@ Web UI 由它自己的后端托管、与后端同源，所以桌面外壳原样�
 
 ## 前置条件
 
-- PATH 上有 Node.js >= 22.19(后端跑在用户独立安装的 Node 下，不是 Electron 内置的)。
-- `pnpm install`
+- 从源码构建/运行:Node.js >= 22.19 + `pnpm install`。
+- 最终用户什么都不用装:安装器自带一份钉版本的独立 Node 运行时
+  (`resources/node`,由后端构建脚本从 nodejs.org 官方归档下载并校验
+  SHASUMS256),后端、`dsh` CLI shim 与 Electron 外壳都用它。后端不能用
+  Electron 内置的 Node——它的 `node-addon-require-builtin` 插件(HMR)需要
+  Electron 不提供的 V8 embedder 槽位。
 
-macOS GUI 应用不继承 shell 的 PATH。打包后的应用会自动探测 Homebrew/MacPorts 的标准 node 位置与登录 shell;如需显式覆盖,请设置 `DSH_NODE=/绝对路径/node`。
+内置运行时是便利而非锁定:设置 `DSH_NODE=/绝对路径/node` 可强制指定 Node
+ 二进制(优先级高于内置),删掉 `resources/node` 则回落到 PATH 上的 `node`。
+macOS GUI 启动时,回落链还会自动探测 Homebrew/MacPorts 的标准 node 位置与
+登录 shell。
 
 ## 运行
 
@@ -65,7 +72,7 @@ pnpm dist -- --platform darwin --arch arm64
 产物落在 `dist-desktop/release/darwin/<arch>/`:`.dmg` 与 `.zip` 命名为
 `DeepSeek Harness-<版本>-<架构>.<ext>`,同级是打包后的 `.app` 目录。本地构建无需签名证书;若要分发,请设置 `CSC_LINK`/`CSC_KEY_PASSWORD` 签名,并在对外分享前对 DMG 做 notarization。
 
-后端闭包(`scripts/build-desktop-backend.mjs --platform win32|darwin --arch x64|arm64`)把提交在仓库里的 registry 清单(`backend/`:精确版本钉住的 `@deepseek-ai/dsh` 及其 lockfile)用 `npm ci --omit=dev --ignore-scripts --os=<platform> --cpu=<arch>` 物化,把 registry CLI 包提升到 staging 根(`lib/bin.js` 与 `node_modules` 并列),裁掉运行时死文件与 node-pty 的非目标平台 `prebuilds/`,并在打包前以 fail-loud 断言确认目标平台的 addon 在位。安装期 `--os`/`--cpu` 过滤只装目标平台叶子包(`@img/sharp-<platform>-<arch>`、`@koromix/koffi-<platform>-<arch>`)。`--ignore-scripts` 是硬要求:放行的话 koffi 的 cnoke postinstall 会在异构主机上尝试源码构建并失败,而预编译叶子包让闭包里的安装脚本全无必要。跨平台/跨架构构建会跳过 spawn 自检(目标 addon 在宿主 node 下无法加载);各闭包的自检需在匹配的原生硬件上运行。后端升级是显式动作:改 `backend/package.json` 的钉住版本、重新生成 lockfile、发新安装器。
+后端闭包(`scripts/build-desktop-backend.mjs --platform win32|darwin --arch x64|arm64`)把提交在仓库里的 registry 清单(`backend/`:精确版本钉住的 `@deepseek-ai/dsh` 及其 lockfile)用 `npm ci --omit=dev --ignore-scripts --os=<platform> --cpu=<arch>` 物化,把 registry CLI 包提升到 staging 根(`lib/bin.js` 与 `node_modules` 并列),裁掉运行时死文件与 node-pty 的非目标平台 `prebuilds/`,并在打包前以 fail-loud 断言确认目标平台的 addon 在位。安装期 `--os`/`--cpu` 过滤只装目标平台叶子包(`@img/sharp-<platform>-<arch>`、`@koromix/koffi-<platform>-<arch>`)。`--ignore-scripts` 是硬要求:放行的话 koffi 的 cnoke postinstall 会在异构主机上尝试源码构建并失败,而预编译叶子包让闭包里的安装脚本全无必要。跨平台/跨架构构建会跳过 spawn 自检(目标 addon 在宿主 node 下无法加载);各闭包的自检需在匹配的原生硬件上运行。同一脚本还会落盘内置 Node 运行时(钉在 `scripts/build-desktop-backend.mjs` 的 `NODE_VERSION`):从 nodejs.org 下载官方归档(`DSH_NODE_DIST_MIRROR` 可覆盖镜像)、对官方 `SHASUMS256.txt` 校验、缓存到 `dist-desktop/cache/`,只装 node 二进制本体(不含 npm/corepack)到 `resources/node`。自检用这份运行时加一次性 `DSH_HOME` 跑,等价于新用户首启。后端升级是显式动作:改 `backend/package.json` 的钉住版本、重新生成 lockfile、发新安装器;升级内置 Node 是对 `NODE_VERSION` 的同一套流程。
 
 ## 说明
 
