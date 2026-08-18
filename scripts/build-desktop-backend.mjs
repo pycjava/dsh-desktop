@@ -53,8 +53,14 @@ const NODE_STAGING = resolve(root, 'dist-desktop', 'node-runtime')
  * under Electron's embedded Node, so a separate runtime must ship.
  */
 const NODE_VERSION = '24.19.0'
-/** Mirror override for nodejs.org/dist (e.g. corporate or regional mirrors). */
+/** Mirror override for downloading node archives (e.g. corporate or regional mirrors). */
 const NODE_DIST_BASE = (process.env.DSH_NODE_DIST_MIRROR || 'https://nodejs.org/dist').replace(/\/+$/, '')
+/**
+ * Checksums always come from official nodejs.org: a mirror may serve the
+ * archive, but never the sums that vouch for it — a compromised mirror must
+ * not be able to forge both sides of the verification.
+ */
+const NODE_OFFICIAL_DIST = 'https://nodejs.org/dist'
 /** Archive cache so repeat builds re-fetch nothing; hash-verified on every use. */
 const NODE_CACHE = resolve(root, 'dist-desktop', 'cache')
 /** Backend entry, at the staging root after the CLI package is promoted. */
@@ -327,8 +333,9 @@ async function findFile(dir, name) {
 }
 
 /**
- * Expected sha256 for a nodejs.org archive, from the version's cached
- * SHASUMS256.txt (fetched once per version).
+ * Expected sha256 for a node archive, from the version's cached
+ * SHASUMS256.txt (fetched once per version, always from official nodejs.org
+ * even when the archive itself comes from a mirror).
  * @param {string} fileName
  * @returns {Promise<string>}
  */
@@ -338,7 +345,7 @@ async function expectedChecksum(fileName) {
   try {
     text = await readFile(sumsFile, 'utf8')
   } catch {
-    const res = await fetch(`${NODE_DIST_BASE}/v${NODE_VERSION}/SHASUMS256.txt`)
+    const res = await fetch(`${NODE_OFFICIAL_DIST}/v${NODE_VERSION}/SHASUMS256.txt`)
     if (!res.ok) throw new Error(`fetching SHASUMS256.txt failed: HTTP ${res.status}`)
     text = await res.text()
     await writeFile(sumsFile, text)
@@ -347,6 +354,13 @@ async function expectedChecksum(fileName) {
   if (!/^[0-9a-f]{64}$/.test(sum ?? '')) throw new Error(`SHASUMS256.txt has no entry for ${fileName}`)
   return sum
 }
+
+/**
+ * Quote as a PowerShell single-quoted string literal (' escaped by doubling)
+ * so archive/destination paths survive interpolation into -Command.
+ * @param {string} value
+ */
+const psQuote = (value) => `'${value.replaceAll("'", "''")}'`
 
 /**
  * Stage the bundled Node runtime for one target: download the official
@@ -384,7 +398,7 @@ async function stageNodeRuntime(platform, arch) {
     const extraction = archiveName.endsWith('.zip')
       ? (process.platform === 'win32'
         ? execOk('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
-          `Expand-Archive -LiteralPath '${archive}' -DestinationPath '${extractDir}' -Force`])
+          `Expand-Archive -LiteralPath ${psQuote(archive)} -DestinationPath ${psQuote(extractDir)} -Force`])
         : execOk('tar', ['-xf', archive, '-C', extractDir]))
       : execOk('tar', ['-xzf', archive, '-C', extractDir])
     const { ok, why } = await extraction
