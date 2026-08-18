@@ -48,6 +48,23 @@ function resolveDshHome () {
 }
 
 /**
+ * Write via temp file + rename so a concurrently running dsh CLI or editor
+ * never observes a torn partial manifest (rename replaces atomically).
+ * @param {string} file
+ * @param {string} content
+ */
+function writeFileAtomic (file, content) {
+  const temp = `${file}.dsh-tmp-${process.pid}`
+  fs.writeFileSync(temp, content)
+  try {
+    fs.renameSync(temp, file)
+  } catch (err) {
+    fs.rmSync(temp, { force: true })
+    throw err
+  }
+}
+
+/**
  * Create the files dsh-app-boot's initProfile would create, but only when
  * they are absent. The backend writes the root cordis.yml itself; these two
  * optional files are part of the normal profile layout.
@@ -101,7 +118,7 @@ function ensureDesktopPlugins (backendRoot) {
       dependencies: {},
       dsh: { profile: { bundles: [...DEFAULT_WEB_BUNDLES, ...desktopBundles] } },
     }
-    fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+    writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
     return
   }
 
@@ -123,7 +140,7 @@ function ensureDesktopPlugins (backendRoot) {
       bundles: existing.length === 0 ? [...DEFAULT_WEB_BUNDLES, ...missing] : [...existing, ...missing],
     },
   }
-  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+  writeFileAtomic(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
 }
 
 module.exports = { ensureDesktopPlugins }
