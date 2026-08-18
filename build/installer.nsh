@@ -8,8 +8,9 @@
 ; across upgrades and install-directory changes.
 ;
 ; Both shims run the backend under the Node bundled at resources\node, so no
-; user-installed Node is needed; `node` from PATH is the fallback when the
-; bundled binary is missing.
+; user-installed Node is needed; a DSH_NODE override wins (same as the app's
+; locateNode), and `node` from PATH is the fallback when the bundled binary
+; is missing.
 ;
 ; customUnInstall deletes only the two shim files and removes the PATH entry
 ; (resources\cli\remove-cli-path.ps1); anything else in .dsh or .dsh\bin is
@@ -32,7 +33,9 @@
   FileWrite $0 '  exit /b 1$\r$\n'
   FileWrite $0 ')$\r$\n'
   FileWrite $0 'pushd "%DSH_BACKEND%"$\r$\n'
-  FileWrite $0 'if exist "%DSH_NODE_EXE%" ($\r$\n'
+  FileWrite $0 'if exist "%DSH_NODE%" ($\r$\n'
+  FileWrite $0 '  "%DSH_NODE%" "lib\bin.js" %*$\r$\n'
+  FileWrite $0 ') else if exist "%DSH_NODE_EXE%" ($\r$\n'
   FileWrite $0 '  "%DSH_NODE_EXE%" "lib\bin.js" %*$\r$\n'
   FileWrite $0 ') else ($\r$\n'
   FileWrite $0 '  node "lib\bin.js" %*$\r$\n'
@@ -56,7 +59,9 @@
   FileWrite $0 '  exit 1$\n'
   FileWrite $0 'fi$\n'
   FileWrite $0 'cd "$$DSH_BACKEND" || exit 1$\n'
-  FileWrite $0 'if [ -f "$$DSH_NODE_EXE" ]; then$\n'
+  FileWrite $0 'if [ -f "$$DSH_NODE" ]; then$\n'
+  FileWrite $0 '  exec "$$DSH_NODE" "$$DSH_BACKEND\lib\bin.js" "$$@"$\n'
+  FileWrite $0 'elif [ -f "$$DSH_NODE_EXE" ]; then$\n'
   FileWrite $0 '  exec "$$DSH_NODE_EXE" "$$DSH_BACKEND\lib\bin.js" "$$@"$\n'
   FileWrite $0 'else$\n'
   FileWrite $0 '  exec node "$$DSH_BACKEND\lib\bin.js" "$$@"$\n'

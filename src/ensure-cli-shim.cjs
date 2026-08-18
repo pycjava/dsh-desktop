@@ -11,9 +11,10 @@
  *
  * Windows-only by design: macOS builds ship the .app bundle and do not seed a
  * `dsh` CLI shim. The shims run the backend under the Node bundled beside it
- * at resources/node/node.exe — so the CLI needs no user-installed Node —
- * falling back to `node` from PATH when the bundled binary is missing, with
- * cwd = backend root exactly like the Electron shell spawns it.
+ * at resources/node/node.exe — so the CLI needs no user-installed Node. A
+ * DSH_NODE override wins (matching the app's locateNode), `node` from PATH is
+ * the last resort when the bundled binary is missing, and cwd = backend root
+ * exactly like the Electron shell spawns it.
  */
 'use strict'
 
@@ -34,10 +35,11 @@ function dshHomeDir (env = process.env) {
 
 /**
  * The two shims: dsh.cmd serves cmd.exe and PowerShell, the extensionless
- * dsh serves Git Bash. Both prefer the Node bundled at resources/node (the
- * sibling `node` dir next to the backend root) and fall back to `node` from
- * PATH. Keep in sync with build/installer.nsh — same template, this copy
- * just has the backend root and node.exe spliced in.
+ * dsh serves Git Bash. Node resolution matches the app's locateNode: a
+ * DSH_NODE override wins, then the Node bundled at resources/node (the
+ * sibling `node` dir next to the backend root), then `node` from PATH. Keep
+ * in sync with build/installer.nsh — same template, this copy just has the
+ * backend root and node.exe spliced in.
  * @param {string} backendRoot
  */
 function shimContents (backendRoot) {
@@ -53,7 +55,9 @@ function shimContents (backendRoot) {
     '  exit /b 1',
     ')',
     'pushd "%DSH_BACKEND%"',
-    'if exist "%DSH_NODE_EXE%" (',
+    'if exist "%DSH_NODE%" (',
+    '  "%DSH_NODE%" "lib\\bin.js" %*',
+    ') else if exist "%DSH_NODE_EXE%" (',
     '  "%DSH_NODE_EXE%" "lib\\bin.js" %*',
     ') else (',
     '  node "lib\\bin.js" %*',
@@ -75,7 +79,9 @@ function shimContents (backendRoot) {
     '  exit 1',
     'fi',
     'cd "$DSH_BACKEND" || exit 1',
-    'if [ -f "$DSH_NODE_EXE" ]; then',
+    'if [ -f "$DSH_NODE" ]; then',
+    '  exec "$DSH_NODE" "$DSH_BACKEND\\lib\\bin.js" "$@"',
+    'elif [ -f "$DSH_NODE_EXE" ]; then',
     '  exec "$DSH_NODE_EXE" "$DSH_BACKEND\\lib\\bin.js" "$@"',
     'else',
     '  exec node "$DSH_BACKEND\\lib\\bin.js" "$@"',
