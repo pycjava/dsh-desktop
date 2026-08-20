@@ -20,13 +20,14 @@
  */
 'use strict'
 
-const { app, BrowserWindow, shell, nativeTheme, ipcMain } = require('electron')
+const { app, BrowserWindow, dialog, shell, nativeTheme, ipcMain } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const http = require('node:http')
 const path = require('node:path')
 const fs = require('node:fs')
 const { ensureCliShim } = require('./ensure-cli-shim.cjs')
 const { ensureDesktopPlugins } = require('./ensure-desktop-plugins.cjs')
+const { checkForUpdate, compareVersions } = require('./update-check.cjs')
 
 /** Repository root (this file lives at src/main.cjs). */
 const ROOT = path.resolve(__dirname, '..')
@@ -64,6 +65,31 @@ const stderrTail = []
 /** Node executable resolved by checkNode(); backendSpec spawns this. */
 let nodeCmd = 'node'
 
+/** @type {Electron.BrowserWindow | null} */
+let updateWin = null
+/** Version the currently open dialog describes ({version, url?}); url is the
+ * browser download page and only exists for the macOS flow. */
+let updateInfo = null
+/** Which update flow drives the dialog: 'auto' (electron-updater, packaged
+ * Windows) or 'browser' (macOS download page). */
+let updateMode = 'browser'
+/** Dialog flow phase: 'prompt' | 'downloading' | 'downloaded' | 'error'. */
+let updatePhase = 'prompt'
+/** Last download-progress sample from electron-updater, or null. */
+let updateProgress = null
+/** Message behind the dialog's error state, or null. */
+let updateError = null
+/** electron-updater handle; created lazily for packaged Windows only. */
+let autoUpdater = null
+/** Cancels the in-flight download when the dialog closes mid-download. */
+let downloadCt = null
+/** {version} once an update finished downloading; drives the quit prompt. */
+let downloadedUpdate = null
+/** Set once this session must not ask "install on quit?" again. */
+let skipQuitInstallPrompt = false
+/** maybeCheckForUpdates() is in flight; suppresses concurrent checks. */
+let updateCheckRunning = false
+
 // Title-bar controls: the custom title bar is injected into the renderer by
 // preload.cjs and calls back over these channels.
 ipcMain.on('win:minimize', () => win?.minimize())
@@ -85,6 +111,36 @@ ipcMain.on('boot:ready', () => {
 ipcMain.on('boot:retry', () => {
   if (phase !== 'error' || starting) return
   void attemptBoot()
+})
+
+// Update dialog bridge. The page reports its listener attached and then
+// receives the full dialog state; every state change is pushed on the same
+// channel so the page stays a pure renderer. On Windows the buttons drive
+// electron-updater (download/retry, restart to install); on macOS the dialog
+// only ever offers the browser download page.
+ipcMain.on('update:ready', () => pushUpdateState())
+ipcMain.on('update:open-download', () => {
+  const url = updateInfo?.url
+  // Only ever hand https URLs to the OS browser.
+  if (url && /^https:\/\//i.test(url)) shell.openExternal(url)
+})
+ipcMain.on('update:download', () => startUpdateDownload())
+ipcMain.on('update:install', () => {
+  if (!downloadedUpdate || !autoUpdater) return
+  // The user just answered the install question; the quit-time prompt must
+  // not re-ask when quitAndInstall re-enters before-quit. Silent install +
+  // force-run-after: the wizard never shows and the app relaunches itself.
+  skipQuitInstallPrompt = true
+  autoUpdater.quitAndInstall(true, true)
+})
+ipcMain.on('update:dismiss', () => {
+  // Only a prompt-stage "not now" means "stop asking for this version"; a
+  // downloaded update stays cached for the quit-time install question, and a
+  // cancelled download re-prompts on the next launch.
+  if (updatePhase === 'prompt' && updateInfo) {
+    writeUpdateState({ dismissedVersion: updateInfo.version })
+  }
+  updateWin?.close()
 })
 
 /**
@@ -534,9 +590,258 @@ async function attemptBoot () {
   }
 }
 
+/**
+ * Where the update state (the ignored version) is persisted.
+ * @returns {string}
+ */
+function updateStatePath () {
+  return path.join(app.getPath('userData'), 'update-state.json')
+}
+
+/**
+ * Read the persisted update state, tolerating a missing or corrupt file.
+ * @returns {{ dismissedVersion?: string }}
+ */
+function readUpdateState () {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(updateStatePath(), 'utf8'))
+    return typeof parsed === 'object' && parsed !== null ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Persist the update state atomically (temp file + rename), tolerating
+ * failures — update bookkeeping must never break the app.
+ * @param {{ dismissedVersion?: string }} state
+ */
+function writeUpdateState (state) {
+  try {
+    const target = updateStatePath()
+    const tmp = `${target}.tmp`
+    fs.writeFileSync(tmp, JSON.stringify(state))
+    fs.renameSync(tmp, target)
+  } catch (err) {
+    console.error('[desktop] failed to persist update state:', err.message)
+  }
+}
+
+/**
+ * Where the update check looks for the electron-builder latest.yml feed.
+ * Defaults to this repo's GitHub Releases; DSH_UPDATE_FEED overrides with a
+ * full feed URL or a directory base (the per-platform filename is appended),
+ * and disables the check when set to `off`/`false`/`0`. Linux has no
+ * installer in the MVP, so the check is disabled there.
+ * @returns {string | null}
+ */
+function updateFeedUrl () {
+  if (process.platform === 'linux') return null
+  const file = process.platform === 'darwin' ? 'latest-mac.yml' : 'latest.yml'
+  const raw = process.env.DSH_UPDATE_FEED?.trim()
+  if (raw) {
+    if (/^(0|off|false|disabled)$/i.test(raw)) return null
+    const base = raw.replace(/\/+$/, '')
+    return /\.ya?ml$/i.test(base) ? base : `${base}/${file}`
+  }
+  return `https://github.com/pycjava/dsh-desktop/releases/latest/download/${file}`
+}
+
+/**
+ * electron-updater's generic provider takes the directory serving latest.yml,
+ * while DSH_UPDATE_FEED may be either a full feed URL or a directory base;
+ * strip the feed filename when present.
+ * @param {string} feedUrl
+ * @returns {string}
+ */
+function genericFeedBase (feedUrl) {
+  return feedUrl.replace(/\/[^/]+\.ya?ml$/i, '')
+}
+
+/**
+ * Send the full dialog state to the update page; a no-op when no dialog is
+ * open. Everything travels as one payload so the page is a pure renderer.
+ */
+function pushUpdateState () {
+  if (!updateWin || !updateInfo) return
+  updateWin.webContents.send('update:state', {
+    mode: updateMode,
+    phase: updatePhase,
+    currentVersion: app.getVersion(),
+    version: updateInfo.version,
+    url: updateInfo.url ?? null,
+    progress: updateProgress,
+    error: updateError,
+  })
+}
+
+/**
+ * Open the small frameless "new version" dialog over the main window. Its
+ * content depends on the flow: on Windows it walks prompt → downloading →
+ * downloaded/error (driving electron-updater); on macOS it only links to the
+ * browser download page.
+ */
+function showUpdateDialog () {
+  if (updateWin && !updateWin.isDestroyed()) {
+    updateWin.focus()
+    pushUpdateState()
+    return
+  }
+  updateWin = new BrowserWindow({
+    width: 460,
+    height: 250,
+    parent: win ?? undefined,
+    frame: false,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#151517' : '#ffffff',
+    webPreferences: {
+      contextIsolation: true,
+      sandbox: true,
+      preload: path.join(__dirname, 'update-preload.cjs'),
+    },
+  })
+  updateWin.loadFile(path.join(__dirname, 'update.html'))
+  updateWin.on('closed', () => {
+    updateWin = null
+    // Closing the dialog mid-download cancels it: the user no longer sees or
+    // controls the transfer, so it must not keep running in the background.
+    if (updatePhase === 'downloading' && downloadCt) downloadCt.cancel()
+  })
+}
+
+/**
+ * Create and wire the electron-updater handle (packaged Windows only). The
+ * installer's publish config ships as resources/app-update.yml and is the
+ * default feed; a DSH_UPDATE_FEED override swaps in a generic provider so the
+ * full flow can be tested against any static file host. Downloads and
+ * installs stay user-driven: autoDownload and autoInstallOnAppQuit are off.
+ * @param {string | null} overrideBase generic feed base URL, or null for the
+ * packaged default
+ * @returns {import('electron-updater').AppUpdater}
+ */
+function setupAutoUpdater (overrideBase) {
+  if (autoUpdater) return autoUpdater
+  const updater = require('electron-updater').autoUpdater
+  updater.autoDownload = false
+  updater.autoInstallOnAppQuit = false
+  // allowPrerelease auto-enables when the running version is itself a
+  // prerelease (electron-updater default), so rc installs track rc feeds and
+  // future stable installs only see stable releases — no config needed.
+  if (overrideBase) updater.setFeedURL({ provider: 'generic', url: overrideBase })
+  updater.on('download-progress', (progress) => {
+    if (updatePhase !== 'downloading') return
+    updateProgress = {
+      percent: progress.percent,
+      transferred: progress.transferred,
+      total: progress.total,
+      bytesPerSecond: progress.bytesPerSecond,
+    }
+    pushUpdateState()
+  })
+  updater.on('update-downloaded', (info) => {
+    downloadedUpdate = { version: info.version }
+    if (updateWin) {
+      updatePhase = 'downloaded'
+      pushUpdateState()
+    }
+  })
+  updater.on('error', (err) => {
+    console.error('[desktop] update error:', err?.message ?? err)
+    if (updateWin && updatePhase === 'downloading') {
+      updatePhase = 'error'
+      updateError = String(err?.message ?? err)
+      pushUpdateState()
+    }
+  })
+  autoUpdater = updater
+  return updater
+}
+
+/**
+ * Begin (or retry) the update download. Only reachable from the dialog's
+ * download/retry buttons; concurrent starts are suppressed while one is in
+ * flight, and a completed download is never restarted.
+ */
+function startUpdateDownload () {
+  if (!autoUpdater || downloadedUpdate || downloadCt) return
+  const { CancellationToken } = require('electron-updater')
+  downloadCt = new CancellationToken()
+  updatePhase = 'downloading'
+  updateProgress = null
+  updateError = null
+  pushUpdateState()
+  autoUpdater.downloadUpdate(downloadCt)
+    .catch((err) => {
+      console.error('[desktop] update download failed:', err?.message ?? err)
+      // The updater's own 'error' event drives the dialog; this is the
+      // fallback for rejections it does not surface.
+      if (updateWin && updatePhase === 'downloading') {
+        updatePhase = 'error'
+        updateError = String(err?.message ?? err)
+        pushUpdateState()
+      }
+    })
+    .finally(() => {
+      downloadCt = null
+    })
+}
+
+/**
+ * One update check per launch (no time throttle — the dialog's "not now"
+ * already suppresses re-prompting for that version). Packaged Windows uses
+ * electron-updater and drives download/install from the dialog; macOS keeps
+ * the feed check that links to the browser download page; dev runs are
+ * skipped unless DSH_UPDATE_DEV is set (and even then the auto flow needs a
+ * packaged app, so dev Windows only exercises the browser flow). Any failure
+ * is logged and silent — update checking never affects boot or the UI.
+ */
+async function maybeCheckForUpdates () {
+  if (updateCheckRunning) return
+  if (!app.isPackaged && !process.env.DSH_UPDATE_DEV) return
+  const feedUrl = updateFeedUrl()
+  if (!feedUrl) return
+  updateCheckRunning = true
+  try {
+    const state = readUpdateState()
+    const useAuto = app.isPackaged && process.platform === 'win32'
+    if (useAuto) {
+      // Only an explicit DSH_UPDATE_FEED override replaces the packaged
+      // app-update.yml feed (the returned URL already carries it).
+      const override = process.env.DSH_UPDATE_FEED?.trim()
+      const updater = setupAutoUpdater(override ? genericFeedBase(feedUrl) : null)
+      const result = await updater.checkForUpdates()
+      const version = result?.updateInfo?.version
+      if (version && compareVersions(version, app.getVersion()) > 0 && version !== state.dismissedVersion) {
+        updateMode = 'auto'
+        updateInfo = { version }
+        updatePhase = 'prompt'
+        showUpdateDialog()
+      }
+    } else {
+      const update = await checkForUpdate({ currentVersion: app.getVersion(), feedUrl })
+      if (update && update.version !== state.dismissedVersion) {
+        updateMode = 'browser'
+        updateInfo = { version: update.version, url: update.url }
+        updatePhase = 'prompt'
+        showUpdateDialog()
+      }
+    }
+  } catch (err) {
+    console.error('[desktop] update check failed:', err?.message ?? err)
+  } finally {
+    updateCheckRunning = false
+  }
+}
+
 /** Open the window at once; the backend boot starts once the boot page signals ready. */
 async function boot () {
   createWindow()
+  // The update check runs detached from backend boot: it never blocks a step
+  // and its failures never surface to the boot page.
+  void maybeCheckForUpdates()
 }
 
 app.whenReady().then(boot)
@@ -546,4 +851,29 @@ app.on('window-all-closed', () => {
   app.quit()
 })
 
-app.on('before-quit', killBackend)
+app.on('before-quit', (event) => {
+  killBackend()
+  // A downloaded-but-uninstalled update gets one explicit question at quit:
+  // installs only ever happen with the user's consent, and once answered this
+  // session never asks again (re-entrant quits pass straight through).
+  if (!downloadedUpdate || !autoUpdater || skipQuitInstallPrompt) return
+  event.preventDefault()
+  skipQuitInstallPrompt = true
+  const choice = dialog.showMessageBoxSync({
+    type: 'question',
+    title: 'DeepSeek Harness',
+    message: `新版本 ${downloadedUpdate.version} 已下载完成，退出时安装吗？`,
+    detail: '安装完成后应用会自动重新启动。',
+    buttons: ['退出并安装更新', '直接退出'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+  })
+  if (choice === 0) {
+    // Silent install + force-run-after: no wizard, app relaunches into the
+    // new version.
+    autoUpdater.quitAndInstall(true, true)
+  } else {
+    app.quit()
+  }
+})

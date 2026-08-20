@@ -1,0 +1,179 @@
+<!doctype html>
+<!-- Local update dialog for the desktop shell. A small frameless window the
+     main process opens when a newer build exists. On Windows it walks the
+     states prompt → downloading (progress bar) → downloaded (restart to
+     install) / error (retry), driving electron-updater through the preload
+     bridge; on macOS it only links to the browser download page. Styled to
+     match boot.html (light/dark via prefers-color-scheme, drag region on the
+     body, no-drag on the buttons). -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>发现新版本</title>
+<style>
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center;
+    box-sizing: border-box; padding: 22px 28px;
+    background: #ffffff; color: #1f2328;
+    font-family: system-ui, 'Segoe UI', sans-serif;
+    -webkit-app-region: drag;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { background: #151517; color: #f9fafb; }
+  }
+  main { text-align: center; max-width: 400px; }
+  .brand { font-size: 13px; font-weight: 600; letter-spacing: 0.01em; opacity: 0.72; margin-bottom: 16px; }
+  h1 { font-size: 16px; font-weight: 600; margin: 0 0 10px; }
+  #versions { font-size: 13px; opacity: 0.8; margin: 0 0 22px; line-height: 1.7; }
+  #versions b { font-variant-numeric: tabular-nums; font-weight: 600; }
+  #message { font-size: 13px; opacity: 0.8; margin: 0 0 22px; line-height: 1.6;
+             overflow-wrap: anywhere; }
+  #progress-wrap { margin: 4px 0 6px; }
+  #progress-track {
+    height: 6px; border-radius: 3px; overflow: hidden;
+    background: rgba(128, 128, 128, 0.25);
+  }
+  #progress-fill {
+    height: 100%; width: 0%;
+    background: #4d6bfe; border-radius: 3px;
+    transition: width 0.2s ease;
+  }
+  #progress-text { font-size: 12px; opacity: 0.75; margin-top: 6px;
+                   font-variant-numeric: tabular-nums; }
+  .actions { display: flex; gap: 10px; justify-content: center; }
+  button {
+    -webkit-app-region: no-drag;
+    font: inherit; font-size: 13px; padding: 7px 20px;
+    color: inherit; background: rgba(128, 128, 128, 0.15);
+    border: 1px solid rgba(128, 128, 128, 0.35); border-radius: 6px;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(128, 128, 128, 0.25); }
+  button.primary { background: #4d6bfe; border-color: #4d6bfe; color: #ffffff; }
+  button.primary:hover { background: #3f5bef; }
+  /* Only the block for the active phase is visible. */
+  body[data-phase='prompt'] #phase-prompt { display: block; }
+  body[data-phase='downloading'] #phase-downloading { display: block; }
+  body[data-phase='downloaded'] #phase-downloaded { display: block; }
+  body[data-phase='error'] #phase-error { display: block; }
+  #phase-prompt, #phase-downloading, #phase-downloaded, #phase-error { display: none; }
+</style>
+</head>
+<body data-phase="prompt">
+  <main>
+    <div class="brand">DeepSeek Harness</div>
+
+    <div id="phase-prompt">
+      <h1>发现新版本</h1>
+      <div id="versions">正在检查版本信息…</div>
+      <div class="actions">
+        <button id="confirm" class="primary" type="button" hidden>下载并更新</button>
+        <button id="dismiss" type="button" hidden>暂不</button>
+      </div>
+    </div>
+
+    <div id="phase-downloading">
+      <h1>正在下载新版本</h1>
+      <div id="progress-wrap">
+        <div id="progress-track"><div id="progress-fill"></div></div>
+        <div id="progress-text">准备中…</div>
+      </div>
+      <div class="actions">
+        <button id="cancel" type="button">取消</button>
+      </div>
+    </div>
+
+    <div id="phase-downloaded">
+      <h1>更新已就绪</h1>
+      <div id="message">新版本已下载完成，重启应用后完成安装。</div>
+      <div class="actions">
+        <button id="install" class="primary" type="button">立即重启更新</button>
+        <button id="later" type="button">暂不</button>
+      </div>
+    </div>
+
+    <div id="phase-error">
+      <h1>下载失败</h1>
+      <div id="error-text">下载新版本时出现问题。</div>
+      <div class="actions">
+        <button id="retry" class="primary" type="button">重试</button>
+        <button id="close-error" type="button">关闭</button>
+      </div>
+    </div>
+  </main>
+  <script>
+    'use strict'
+    const $ = (id) => document.getElementById(id)
+    const versions = $('versions')
+    const confirmBtn = $('confirm')
+
+    // Format bytes as MB with one decimal; progress payloads are byte counts.
+    function mb (bytes) {
+      if (!Number.isFinite(bytes)) return '?'
+      return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+    }
+
+    // All dynamic text goes through textContent: the payload originates from
+    // the update feed and never becomes markup.
+    function renderVersions (state) {
+      versions.textContent = ''
+      const cur = document.createElement('b')
+      cur.textContent = state.currentVersion || '?'
+      const next = document.createElement('b')
+      next.textContent = state.version || '?'
+      versions.append('当前版本 ')
+      versions.append(cur)
+      versions.append(document.createElement('br'))
+      versions.append('最新版本 ')
+      versions.append(next)
+    }
+
+    // Which flow drives the dialog; set from the first state push and used by
+    // the prompt button to pick its action.
+    let mode = 'auto'
+
+    function render (state) {
+      mode = state.mode
+      document.body.dataset.phase = state.phase
+      if (state.phase === 'prompt') {
+        renderVersions(state)
+        // macOS keeps the browser-download flow; Windows downloads in-app.
+        confirmBtn.textContent = mode === 'browser' ? '前往下载页' : '下载并更新'
+        confirmBtn.hidden = false
+        $('dismiss').hidden = false
+      } else if (state.phase === 'downloading') {
+        const p = state.progress
+        const percent = p && Number.isFinite(p.percent) ? Math.max(0, Math.min(100, p.percent)) : null
+        $('progress-fill').style.width = (percent ?? 0) + '%'
+        $('progress-text').textContent = percent == null
+          ? '准备中…'
+          : percent.toFixed(1) + '%  ' + mb(p.transferred) + ' / ' + mb(p.total)
+      } else if (state.phase === 'downloaded') {
+        $('message').textContent = '新版本 ' + (state.version || '') + ' 已下载完成，重启应用后完成安装。'
+      } else if (state.phase === 'error') {
+        $('error-text').textContent = state.error || '下载新版本时出现问题。'
+      }
+    }
+
+    if (window.dshUpdate) {
+      window.dshUpdate.onState(render)
+      confirmBtn.addEventListener('click', () => {
+        if (mode === 'browser') window.dshUpdate.openDownload()
+        else window.dshUpdate.download()
+      })
+      $('dismiss').addEventListener('click', () => window.dshUpdate.dismiss())
+      $('cancel').addEventListener('click', () => window.dshUpdate.dismiss())
+      $('install').addEventListener('click', () => window.dshUpdate.install())
+      $('later').addEventListener('click', () => window.dshUpdate.dismiss())
+      $('retry').addEventListener('click', () => window.dshUpdate.download())
+      $('close-error').addEventListener('click', () => window.dshUpdate.dismiss())
+      window.dshUpdate.ready()
+    }
+  </script>
+</body>
+</html>

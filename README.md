@@ -115,11 +115,40 @@ the backend is deliberate: bump the pin in `backend/package.json`, regenerate
 the lockfile, ship a new installer. Upgrading the bundled Node is the same
 ritual on `NODE_VERSION`.
 
+### In-app updates (Windows) / update prompt (macOS)
+
+Packaged builds check the release feed once per launch — on Windows through
+`electron-updater` (full in-app flow), on macOS through the built-in feed
+check that links to the browser download page (auto-update there needs code
+signing + notarization first). A failed check (offline, unreachable feed,
+malformed yml) is fully silent and never affects boot.
+
+On Windows the flow is consent-driven end to end: a dialog announces the new
+version, the user clicks download and watches the progress bar (closing the
+dialog cancels the download), and only the「立即重启更新」button installs —
+via a silent reinstall that relaunches the app. If a downloaded update is
+left uninstalled, quitting asks once whether to install it on the way out;
+nothing is ever installed without an explicit yes. 「暂不」at the prompt
+silences that version until the next one.
+
+- The feed defaults to this repo's GitHub Releases (the `publish` block in
+  `electron-builder.yml` ships as `resources/app-update.yml`). Publish a
+  release with `GH_TOKEN=<token> node scripts/release-desktop.mjs`, which
+  uploads the installer, its `.blockmap`, and `latest.yml` together and
+  verifies the feed's url lines name exactly the staged files. Artifacts are
+  hyphen-joined (`DeepSeek-Harness-<version>-<arch>-setup.exe`) so the file
+  name, the feed, and the GitHub asset name are identical.
+- `DSH_UPDATE_FEED` overrides the feed: a full feed URL, or a directory base
+  (the per-platform filename is appended); set it to `off`/`false`/`0` to
+  disable checking. Dev runs skip unless `DSH_UPDATE_DEV=1` (the in-app
+  download flow needs a packaged app, so dev Windows only exercises the
+  browser-link flow).
+- The ignored version lives in `userData/update-state.json`.
+
 ### Bundled plugins
 
-The desktop installers enable four dsh plugins by default:
+The desktop installers enable three dsh plugins by default:
 
-- `dsh-fusion` (dsh-preset)
 - `@liustack/modlens`
 - `dsh-usage-ledger`
 - `dsh-git-tree`

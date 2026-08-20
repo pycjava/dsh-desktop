@@ -10,7 +10,10 @@ files:
   - src/ensure-cli-shim.cjs
   - src/ensure-desktop-plugins.cjs
   - src/preload.cjs
+  - src/update-check.cjs
+  - src/update-preload.cjs
   - src/boot.html
+  - src/update.html
   - package.json
 extraResources:
   - from: dist-desktop/backend
@@ -56,14 +59,28 @@ mac:
   # Local unsigned DMGs are buildable without a certificate; set CSC_LINK /
   # CSC_KEY_PASSWORD (or configure identity) for a signed release build.
   category: public.app-category.developer-tools
-  # Arch in the artifact name: users pick the right download by arch.
-  artifactName: ${productName}-${version}-${arch}.${ext}
+  # Arch in the artifact name: users pick the right download by arch. Hyphen-
+  # joined (no spaces) so the file name, the url lines electron-builder writes
+  # into latest-mac.yml, and the GitHub Release asset name are all identical
+  # (GitHub never has to rename the upload, which would break the feed).
+  artifactName: DeepSeek-Harness-${version}-${arch}.${ext}
 nsis:
   # Seeds the dsh CLI shims + user PATH entry; see build/installer.nsh.
   include: build/installer.nsh
   # Arch in the artifact name: installers land in dist-desktop/release/win32/
-  # <arch> and users pick the right download by arch.
-  artifactName: ${productName}-${version}-${arch}-setup.${ext}
+  # <arch> and users pick the right download by arch. Hyphen-joined (no
+  # spaces) so the file name, the url lines electron-builder writes into
+  # latest.yml, and the GitHub Release asset name are all identical (GitHub
+  # never has to rename the upload, which would break the update feed).
+  artifactName: DeepSeek-Harness-${version}-${arch}-setup.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+# Where an explicit `electron-builder --publish` uploads artifacts and the
+# latest.yml feeds the in-app update check reads (Phase 0: check + prompt
+# only — the app never installs updates itself). Local builds are unaffected:
+# scripts/build-desktop-installer.mjs passes --publish never.
+publish:
+  provider: github
+  owner: pycjava
+  repo: dsh-desktop

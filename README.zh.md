@@ -74,11 +74,21 @@ pnpm dist -- --platform darwin --arch arm64
 
 后端闭包(`scripts/build-desktop-backend.mjs --platform win32|darwin --arch x64|arm64`)把提交在仓库里的 registry 清单(`backend/`:精确版本钉住的 `@deepseek-ai/dsh` 及其 lockfile)用 `npm ci --omit=dev --ignore-scripts --os=<platform> --cpu=<arch>` 物化,把 registry CLI 包提升到 staging 根(`lib/bin.js` 与 `node_modules` 并列),裁掉运行时死文件与 node-pty 的非目标平台 `prebuilds/`,并在打包前以 fail-loud 断言确认目标平台的 addon 在位。安装期 `--os`/`--cpu` 过滤只装目标平台叶子包(`@img/sharp-<platform>-<arch>`、`@koromix/koffi-<platform>-<arch>`)。`--ignore-scripts` 是硬要求:放行的话 koffi 的 cnoke postinstall 会在异构主机上尝试源码构建并失败,而预编译叶子包让闭包里的安装脚本全无必要。跨平台/跨架构构建会跳过 spawn 自检(目标 addon 在宿主 node 下无法加载);各闭包的自检需在匹配的原生硬件上运行。同一脚本还会落盘内置 Node 运行时(钉在 `scripts/build-desktop-backend.mjs` 的 `NODE_VERSION`):从 nodejs.org 下载官方归档(`DSH_NODE_DIST_MIRROR` 可覆盖镜像)、对官方 `SHASUMS256.txt` 校验、缓存到 `dist-desktop/cache/`,只装 node 二进制本体(不含 npm/corepack)到 `resources/node`。自检用这份运行时加一次性 `DSH_HOME` 跑,等价于新用户首启。后端升级是显式动作:改 `backend/package.json` 的钉住版本、重新生成 lockfile、发新安装器;升级内置 Node 是对 `NODE_VERSION` 的同一套流程。
 
+### 自更新(Windows)/更新提示(macOS)
+
+打包版每次启动检查一次发布源:Windows 走 `electron-updater` 的应用内完整流程;macOS 走内置的 feed 检查、仅提示并跳转浏览器下载页(自动更新需先完成签名/公证)。检查失败(离线、源不可达、feed 损坏)完全静默,不影响启动。
+
+Windows 流程全程以用户同意为准:弹窗告知新版本,用户点击「下载并更新」并在弹窗内看进度(关闭弹窗即取消下载),只有点「立即重启更新」才执行安装 —— 静默重装并自动重启应用。若更新已下载但未安装,退出应用时会再问一次是否顺手装上;任何安装动作都发生在用户明确同意之后。「暂不」表示该版本不再提醒,直到下个版本。
+
+- 发布源默认是本仓库的 GitHub Releases(`electron-builder.yml` 的 `publish` 配置随安装器落盘为 `resources/app-update.yml`)。发版用
+  `GH_TOKEN=<token> node scripts/release-desktop.mjs`,脚本会把安装器、`.blockmap`、`latest.yml` 一并上传,并校验 feed 的 url 行与磁盘产物逐一同名。产物名为连字符形式(`DeepSeek-Harness-<版本>-<架构>-setup.exe`),文件名、feed、GitHub 资产名三方一致。
+- `DSH_UPDATE_FEED` 覆盖发布源:完整 feed URL,或目录基址(自动追加平台文件名);设为 `off`/`false`/`0` 关闭检测。开发模式默认不检查,`DSH_UPDATE_DEV=1` 强制开启(应用内下载流程需要打包后的应用,开发态 Windows 只能走浏览器跳转流程)。
+- 「该版本已忽略」记录在 `userData/update-state.json`。
+
 ### 内置插件
 
-桌面安装包默认启用 4 个 dsh 插件:
+桌面安装包默认启用 3 个 dsh 插件:
 
-- `dsh-fusion`(dsh-preset)
 - `@liustack/modlens`
 - `dsh-usage-ledger`
 - `dsh-git-tree`
