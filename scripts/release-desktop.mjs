@@ -79,8 +79,12 @@ function assertFeedConsistency (feedBody, artifacts) {
   for (const name of referenced) {
     if (!onDisk.has(name)) problems.push(`feed references "${name}" but no such artifact is staged`)
   }
+  // electron-updater derives blockmap URLs by suffixing the installer/zip url
+  // (never listed in the feed), and dmg files are manual downloads outside the
+  // feed entirely — only feed url lines must name a staged file 1:1.
+  const implicitlyReferenced = (name) => name === feedFile || name.endsWith('.blockmap') || name.endsWith('.dmg')
   for (const name of artifacts) {
-    if (name === feedFile) continue
+    if (implicitlyReferenced(name)) continue
     if (!referenced.includes(name)) problems.push(`artifact "${name}" is not referenced by ${feedFile}`)
   }
   if (problems.length) {
