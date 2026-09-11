@@ -438,11 +438,11 @@ async function verifyRun(platform, arch) {
   const nodeBin = join(NODE_STAGING, platform === 'win32' ? 'node.exe' : 'node')
   if (!existsSync(nodeBin)) throw new Error(`bundled node runtime missing at ${nodeBin}`)
   console.log('build-desktop-backend: verifying standalone run under the bundled node...')
-  const READY = /http:\/\/127\.0\.0\.1:(\d+)/
+  const READY = /(http:\/\/127\.0\.0\.1:\d+\S*)/
   const home = await mkdtemp(join(tmpdir(), 'dsh-verify-home-'))
   try {
     await new Promise((resolveP, rejectP) => {
-      const child = spawn(nodeBin, [entry, 'web', '--port', '0'], {
+      const child = spawn(nodeBin, [entry, 'web', '--port', '0', '--no-open'], {
         cwd: STAGING, stdio: ['ignore', 'pipe', 'inherit'],
         env: { ...process.env, DSH_HOME: home },
       })
@@ -459,12 +459,12 @@ async function verifyRun(platform, arch) {
         if (settled) return
         const m = READY.exec(String(chunk))
         if (!m) return
-        const port = Number(m[1])
-        poll(port).then(() => {
+        const url = m[1]
+        poll(url).then(() => {
           settled = true
           clearTimeout(timer)
           child.kill('SIGTERM')
-          console.log(`build-desktop-backend: OK — backend served UI on :${port}`)
+          console.log(`build-desktop-backend: OK — backend served UI at ${new URL(url).origin}`)
           resolveP()
         }).catch((err) => {
           settled = true
@@ -486,23 +486,54 @@ async function verifyRun(platform, arch) {
   }
 }
 
-/** Poll GET / until 200 or the deadline. */
-function poll(port) {
+/**
+ * Poll the readiness URL until it serves the UI with a 200. dsh 0.1.5+ guard
+ * GET / behind a cookie session: the `?token=` query answers 303 + Set-Cookie
+ * and only the cookie-authenticated follow-up returns 200, so the probe
+ * replays that exchange; older versions answer 200 on / directly.
+ * @param {string} url the backend's readiness URL (token query included)
+ * @returns {Promise<void>}
+ */
+function poll(url) {
   const deadline = Date.now() + 30_000
   return new Promise((resolveP, rejectP) => {
     const tick = () => {
-      const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
-        res.resume()
-        if (res.statusCode === 200) return resolveP()
-        if (Date.now() > deadline) return rejectP(new Error('backend did not return 200 in 30s'))
-        setTimeout(tick, 200)
-      })
-      req.on('error', () => {
-        if (Date.now() > deadline) return rejectP(new Error('backend unreachable before deadline'))
-        setTimeout(tick, 200)
-      })
+      probe(url)
+        .then((ok) => {
+          if (ok) return resolveP()
+          if (Date.now() > deadline) return rejectP(new Error('backend did not return 200 in 30s'))
+          setTimeout(tick, 200)
+        })
+        .catch(() => {
+          if (Date.now() > deadline) return rejectP(new Error('backend unreachable before deadline'))
+          setTimeout(tick, 200)
+        })
     }
     tick()
+  })
+}
+
+/**
+ * GET the readiness URL and replay the redirect it answers with, carrying the
+ * cookies it set. Resolves true only when the final response is a 200.
+ * @param {string} url
+ * @returns {Promise<boolean>}
+ */
+function probe(url) {
+  return new Promise((resolveP, rejectP) => {
+    const req = http.get(url, (res) => {
+      res.resume()
+      if (res.statusCode === 200) return resolveP(true)
+      const cookies = (res.headers['set-cookie'] ?? []).map((c) => c.split(';')[0])
+      const location = res.headers.location
+      if (!cookies.length || !location) return resolveP(false)
+      const follow = http.get(new URL(location, url), { headers: { cookie: cookies.join('; ') } }, (res2) => {
+        res2.resume()
+        resolveP(res2.statusCode === 200)
+      })
+      follow.on('error', rejectP)
+    })
+    req.on('error', rejectP)
   })
 }
 

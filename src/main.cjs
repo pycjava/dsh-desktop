@@ -39,8 +39,13 @@ function desktopBackendRoot () {
   return STAGED_BACKEND
 }
 
-/** Matches the `dsh web: http://127.0.0.1:<port>` readiness line. */
-const READY_RE = /http:\/\/127\.0\.0\.1:(\d+)/
+/**
+ * Matches the `dsh web: http://127.0.0.1:<port>` readiness line. Since dsh
+ * 0.1.5 the URL carries a `?token=…` query (the UI sits behind a cookie
+ * session minted by a one-time token exchange), so the whole URL is captured,
+ * not just the port.
+ */
+const READY_RE = /http:\/\/127\.0\.0\.1:\d+\S*/
 
 const HEALTH_TIMEOUT_MS = 30_000
 const HEALTH_INTERVAL_MS = 200
@@ -168,7 +173,7 @@ function sendStatus (status) {
 function backendSpec () {
   if (app.isPackaged) {
     const backendRoot = path.join(process.resourcesPath, 'backend')
-    return { cwd: backendRoot, cmd: nodeCmd, args: [path.join(backendRoot, 'lib', 'bin.js'), 'web', '--port', '0'] }
+    return { cwd: backendRoot, cmd: nodeCmd, args: [path.join(backendRoot, 'lib', 'bin.js'), 'web', '--port', '0', '--no-open'] }
   }
   const sourceRepo = process.env.DSH_SOURCE_REPO
   if (sourceRepo) {
@@ -176,13 +181,13 @@ function backendSpec () {
     if (!fs.existsSync(cliBin)) {
       throw new Error(`DSH_SOURCE_REPO points at ${sourceRepo}, which has no ${cliBin}`)
     }
-    return { cwd: sourceRepo, cmd: nodeCmd, args: ['--import', 'tsx/esm', cliBin, 'web', '--port', '0'] }
+    return { cwd: sourceRepo, cmd: nodeCmd, args: ['--import', 'tsx/esm', cliBin, 'web', '--port', '0', '--no-open'] }
   }
   const entry = path.join(STAGED_BACKEND, 'lib', 'bin.js')
   if (!fs.existsSync(entry)) {
     throw new Error(`backend not staged at ${entry}; run "pnpm run backend" first, or set DSH_SOURCE_REPO to a dsh checkout`)
   }
-  return { cwd: STAGED_BACKEND, cmd: nodeCmd, args: [entry, 'web', '--port', '0'] }
+  return { cwd: STAGED_BACKEND, cmd: nodeCmd, args: [entry, 'web', '--port', '0', '--no-open'] }
 }
 
 const MIN_NODE_MAJOR = 22
@@ -337,7 +342,7 @@ function checkNode () {
  * once its readiness URL is printed, or reject with the reason (including a
  * deadline and the backend's own exit) otherwise. Stderr is mirrored to the
  * console and kept in {@link stderrTail} for the boot page's failure panel.
- * @returns {Promise<number>} the resolved port
+ * @returns {Promise<string>} the backend's readiness URL (token query included)
  */
 function startBackend () {
   return new Promise((resolve, reject) => {
@@ -377,7 +382,7 @@ function startBackend () {
       const text = chunk.toString()
       process.stdout.write(`[dsh] ${text}`)
       const match = READY_RE.exec(text)
-      if (match) settle(resolve, Number(match[1]))
+      if (match) settle(resolve, match[0])
     }
     backend.stdout.on('data', onStdout)
     backend.stderr.on('data', (chunk) => {
@@ -411,13 +416,16 @@ function startBackend () {
 }
 
 /**
- * Poll `GET /` until it answers 200, or reject once the deadline passes. A
- * backend that dies mid-poll (readiness URL printed, UI never served)
- * rejects at once with its exit code instead of grinding to the deadline.
- * @param {number} port
+ * Poll the readiness URL until the UI is served, or reject once the deadline
+ * passes. Pre-0.1.5 backends answer 200 on the URL directly; 0.1.5+ sit the
+ * UI behind a cookie session and answer the `?token=` exchange with a 3xx —
+ * the renderer's loadURL performs that exchange for real. A backend that dies
+ * mid-poll (readiness URL printed, UI never served) rejects at once with its
+ * exit code instead of grinding to the deadline.
+ * @param {string} url
  * @returns {Promise<void>}
  */
-function waitForReady (port) {
+function waitForReady (url) {
   const child = backend
   const deadline = Date.now() + HEALTH_TIMEOUT_MS
   return new Promise((resolve, reject) => {
@@ -438,9 +446,9 @@ function waitForReady (port) {
     }
     child.on('exit', onExit)
     const tick = () => {
-      const req = http.get(`http://127.0.0.1:${port}/`, (res) => {
+      const req = http.get(url, (res) => {
         res.resume()
-        if (res.statusCode === 200) return settle(resolve)
+        if (res.statusCode === 200 || (res.statusCode >= 300 && res.statusCode < 400)) return settle(resolve)
         if (Date.now() > deadline) return settle(reject, new Error('backend did not return 200 in time'))
         setTimeout(tick, HEALTH_INTERVAL_MS)
       })
@@ -567,14 +575,14 @@ async function attemptBoot () {
     }
 
     sendStatus({ state: 'loading', message: '正在启动 DeepSeek Harness 后端…' })
-    const port = await startBackend()
+    const url = await startBackend()
 
     sendStatus({ state: 'loading', message: '正在等待后端服务就绪…' })
-    await waitForReady(port)
+    await waitForReady(url)
 
     if (!win || win.isDestroyed()) return
     phase = 'app'
-    await win.loadURL(`http://127.0.0.1:${port}/`)
+    await win.loadURL(url)
     // Expose this install's backend as the `dsh` CLI: rewrite the ~/.dsh/bin
     // shims (they track this install dir, so upgrades self-heal) and repair
     // the user PATH entry. Fire-and-forget: the CLI is a convenience, never
