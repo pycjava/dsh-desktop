@@ -147,9 +147,8 @@ silences that version until the next one.
 
 ### Bundled plugins
 
-The desktop installers enable three dsh plugins by default:
+The desktop installers enable two dsh plugins by default:
 
-- `@liustack/modlens`
 - `dsh-usage-ledger`
 - `dsh-git-tree`
 

@@ -87,9 +87,8 @@ Windows 流程全程以用户同意为准:弹窗告知新版本,用户点击「�
 
 ### 内置插件
 
-桌面安装包默认启用 3 个 dsh 插件:
+桌面安装包默认启用 2 个 dsh 插件:
 
-- `@liustack/modlens`
 - `dsh-usage-ledger`
 - `dsh-git-tree`
 

@@ -1,6 +1,5 @@
 {
   "bundles": [
-    "@liustack/modlens",
     "dsh-usage-ledger",
     "dsh-git-tree"
   ]
