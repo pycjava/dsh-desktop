@@ -153,6 +153,39 @@ async function assertFrontendDist() {
 }
 
 /**
+ * Declare the desktop-bundled plugins in the promoted root manifest.
+ *
+ * installStaging copies backend/package.json (which declares the plugins so
+ * `npm ci` stages them) to the staging root, but promoteCliPackage then
+ * overwrites that root package.json with the registry CLI package's own
+ * manifest, whose dependencies do not name the plugins. dsh-app-boot's
+ * profile module fallback (healProfilesModuleFallback) walks the promoted
+ * manifest's dependency names to link each closure package into
+ * $DSH_HOME/profiles/node_modules — the directory the Loader's parent-walk
+ * resolves profile bundles from. An undeclared plugin therefore crashes boot
+ * at the loader import (ERR_MODULE_NOT_FOUND) even though it sits in the
+ * closure's node_modules. The specifier is only ever walked as a name, never
+ * installed from, so the staged plugin's exact version is the right value.
+ */
+async function declareDesktopPlugins() {
+  const manifestPath = join(STAGING, 'package.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  const { bundles } = JSON.parse(await readFile(join(STAGING, 'desktop-plugins.json'), 'utf8'))
+  manifest.dependencies ??= {}
+  for (const packageName of bundles) {
+    const plugin = JSON.parse(await readFile(
+      join(STAGING, 'node_modules', ...packageName.split('/'), 'package.json'), 'utf8'))
+    const existing = manifest.dependencies[packageName]
+    if (existing !== undefined && existing !== plugin.version) {
+      throw new Error(`promoted manifest declares ${packageName}@${existing} but the staged plugin is ${plugin.version}; resolve the clash in backend/package.json or desktop-plugins.json`)
+    }
+    manifest.dependencies[packageName] = plugin.version
+  }
+  await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n')
+  console.log(`build-desktop-backend: declared desktop plugins in promoted manifest (${bundles.join(', ')})`)
+}
+
+/**
  * Fail loud when a desktop-bundled plugin is missing or no longer declares a
  * dsh bundle patch. The desktop shell relies on these packages being present
  * in the backend closure and listed in backend/desktop-plugins.json.
@@ -440,6 +473,20 @@ async function verifyRun(platform, arch) {
   console.log('build-desktop-backend: verifying standalone run under the bundled node...')
   const READY = /(http:\/\/127\.0\.0\.1:\d+\S*)/
   const home = await mkdtemp(join(tmpdir(), 'dsh-verify-home-'))
+  // Seed the web profile the way src/ensure-desktop-plugins.cjs does on the
+  // desktop's first launch: the default web bundle stack (kept in sync with
+  // dsh-app-boot's PROFILE_TEMPLATES) plus every desktop-bundled plugin. A
+  // fresh home alone boots only the default template, so a plugin the loader
+  // cannot resolve from the profile would ship broken without the build noticing.
+  const desktopBundles = JSON.parse(await readFile(join(STAGING, 'desktop-plugins.json'), 'utf8')).bundles
+  const profileDir = join(home, 'profiles', 'web')
+  await mkdir(profileDir, { recursive: true })
+  await writeFile(join(profileDir, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web',
+    private: true,
+    dependencies: {},
+    dsh: { profile: { bundles: ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', ...desktopBundles] } },
+  }, null, 2) + '\n')
   try {
     await new Promise((resolveP, rejectP) => {
       const child = spawn(nodeBin, [entry, 'web', '--port', '0', '--no-open'], {
@@ -447,11 +494,22 @@ async function verifyRun(platform, arch) {
         env: { ...process.env, DSH_HOME: home },
       })
       let settled = false
+      /**
+       * Stop the backend and wait for it to actually exit: kill() only
+       * initiates shutdown, and on Windows deleting the throwaway home while
+       * the process still holds a sqlite handle (usage-ledger) fails EBUSY.
+       * Escalate to a force kill after a grace period.
+       * @returns {Promise<void>}
+       */
+      const stop = () => new Promise((resolveStop) => {
+        child.kill('SIGTERM')
+        const force = setTimeout(() => child.kill('SIGKILL'), 10_000)
+        child.once('exit', () => { clearTimeout(force); resolveStop() })
+      })
       const timer = setTimeout(() => {
         if (!settled) {
           settled = true
-          child.kill('SIGTERM')
-          rejectP(new Error('backend did not become ready in 90s'))
+          void stop().then(() => rejectP(new Error('backend did not become ready in 90s')))
         }
       }, 90_000)
       child.stdout.on('data', (chunk) => {
@@ -460,16 +518,16 @@ async function verifyRun(platform, arch) {
         const m = READY.exec(String(chunk))
         if (!m) return
         const url = m[1]
-        poll(url).then(() => {
+        poll(url).then(async () => {
           settled = true
           clearTimeout(timer)
-          child.kill('SIGTERM')
+          await stop()
           console.log(`build-desktop-backend: OK — backend served UI at ${new URL(url).origin}`)
           resolveP()
-        }).catch((err) => {
+        }).catch(async (err) => {
           settled = true
           clearTimeout(timer)
-          child.kill('SIGTERM')
+          await stop()
           rejectP(err)
         })
       })
@@ -482,7 +540,9 @@ async function verifyRun(platform, arch) {
       })
     })
   } finally {
-    await rm(home, { recursive: true, force: true })
+    // maxRetries: Windows can report EBUSY briefly after exit while the OS
+    // releases the sqlite handle.
+    await rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
   }
 }
 
@@ -575,6 +635,7 @@ async function main() {
   console.log(`build-desktop-backend: target ${platform}-${arch}`)
   await installStaging(platform, arch)
   await promoteCliPackage()
+  await declareDesktopPlugins()
   await assertFrontendDist()
   await assertDesktopPlugins()
   await pruneRuntimeDeadWeight(platform, arch)
