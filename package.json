@@ -1,6 +1,6 @@
 {
   "name": "dsh-desktop",
-  "version": "0.1.5-rc.2",
+  "version": "0.1.5-rc.3",
   "private": true,
   "description": "Electron desktop shell for DeepSeek Harness: spawns the published dsh web backend on a loopback port and loads the Web UI in a BrowserWindow.",
   "license": "MIT",
