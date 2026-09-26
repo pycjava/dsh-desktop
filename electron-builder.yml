@@ -9,6 +9,7 @@ files:
   - src/main.cjs
   - src/ensure-cli-shim.cjs
   - src/ensure-desktop-plugins.cjs
+  - src/ensure-feature-defaults.cjs
   - src/preload.cjs
   - src/update-check.cjs
   - src/update-preload.cjs
