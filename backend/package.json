@@ -6,7 +6,7 @@
   "license": "MIT",
   "dependencies": {
     "@deepseek-ai/dsh": "0.1.7-rc.2",
-    "dsh-git-tree": "file:../plugins/dsh-git-tree-0.1.0.tgz",
-    "dsh-usage-ledger": "file:../plugins/dsh-usage-ledger-0.4.4.tgz"
+    "dsh-git-tree": "file:../plugins/dsh-git-tree-0.1.1.tgz",
+    "dsh-usage-ledger": "file:../plugins/dsh-usage-ledger-0.7.0.tgz"
   }
 }
