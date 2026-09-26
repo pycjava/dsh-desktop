@@ -17,16 +17,25 @@
  * CommonJS is deliberate: the main process only needs `electron` plus Node
  * built-ins and never imports other packages, so staying CJS sidesteps
  * ESM-main-process version pitfalls. This package is private and unpublished.
+ *
+ * Since dsh 0.1.7 the shell keeps the process alive when the window closes:
+ * the window hides to a system tray while the backend continues serving
+ * background tasks (scheduled reminders and running jobs), a second launch
+ * just focuses the running instance, and a real quit asks once about the
+ * tasks it would stop. Feature entries the backend ships disabled upstream
+ * (the schedule pair) are pre-enabled per profile by
+ * src/ensure-feature-defaults.cjs.
  */
 'use strict'
 
-const { app, BrowserWindow, dialog, shell, nativeTheme, ipcMain } = require('electron')
+const { app, BrowserWindow, dialog, shell, nativeTheme, ipcMain, Tray, Menu, nativeImage } = require('electron')
 const { spawn, execFileSync } = require('node:child_process')
 const http = require('node:http')
 const path = require('node:path')
 const fs = require('node:fs')
 const { ensureCliShim } = require('./ensure-cli-shim.cjs')
 const { ensureDesktopPlugins } = require('./ensure-desktop-plugins.cjs')
+const { ensureFeatureDefaults } = require('./ensure-feature-defaults.cjs')
 const { checkForUpdate, compareVersions } = require('./update-check.cjs')
 
 /** Repository root (this file lives at src/main.cjs). */
@@ -58,6 +67,10 @@ const STDERR_TAIL_LINES = 200
 let backend = null
 /** @type {Electron.BrowserWindow | null} */
 let win = null
+/** @type {Electron.Tray | null} */
+let tray = null
+/** Readiness URL of the running backend; reloaded when a hidden window is re-shown. */
+let backendUrl = null
 let quitting = false
 /** attemptBoot() is in flight; suppresses concurrent (re)starts. */
 let starting = false
@@ -92,6 +105,8 @@ let downloadCt = null
 let downloadedUpdate = null
 /** Set once this session must not ask "install on quit?" again. */
 let skipQuitInstallPrompt = false
+/** Set once this session must not ask "quit stops background tasks?" again. */
+let skipQuitTaskPrompt = false
 /** maybeCheckForUpdates() is in flight; suppresses concurrent checks. */
 let updateCheckRunning = false
 
@@ -104,6 +119,47 @@ ipcMain.on('win:toggle-maximize', () => {
   else win.maximize()
 })
 ipcMain.on('win:close', () => win?.close())
+
+// 64x64 rounded-square "D" (DeepSeek blue #4D6BFE) as a data URL so the tray
+// needs no on-disk icon resource — the shell still ships no custom app icon.
+const TRAY_ICON_DATA_URL = `data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAJWSURBVHhe7ZsxLARBFIaVSqVSqVTqqM9OaCQqrnNmJI5KriIKUUh0rhSNaBQaiUh0tBrRSFQi0SgVZufJmwvOm927s7d3Nzven3yNvJ3k/27H3l4yQ0McTstEqzAupC4LFW8VBqnLJQkTtEvHmVqCYaHMrlDxu1AGCo00JyUJo7RjatCckPGDs1ChiV9mFEzTrk7wk49U/OQuUHwiGb+1vRPEqjmkF4ZEpMwF7fydxr4PYM+3YXYZxmh3G7v3Ey4IjWjlY452txFKV+lwmMRbtLtN4xlKh0OEBbAA2t2GBbAAFsAC3OEQYQEsgHa3YQEsIH8BO3UDN3fQluNzA/tHBirb7hr500cB9VMDf83zK1hxdK388FzAV+4fAeY33DW7pyACML2RMGABuNfX937AGfw/kJazK3DW7Y4BC8DSdA7Bv6dlsebOZ8dTAQg+BZKCTwk6mx2PBSBYlga3CJ3LjucC0u4COpcdzwUgSaEz2WEBLIB2t/FFAD7ykkLnsuO5APyiRPNvngL4tRdfhmhQCp3NjqcCsPzlDZ1uJN/3AQ8F1A6MffFJCq5B57tjwAKwaPOPIa2S797/YsACOk1vXoWRAgjI/7ZvxlMB+InjfL6vvkn0UQCWaf7xIw16XW/powA/YQEsgHa3YQEsgAWwAHc4RFhAsoBI6k13OERSBOCJCnc4QKQu0+42s2sw4gwHSMvDVEKaa3pBSOBxINr5V+wRuYBPjXR0cGpG6YUwJegq7ZoavBMiFd+6ixSRDo/MJUVUzGS0oiuN7whFQ1czF+dw/k8+AeP5DrbqIEKSAAAAAElFTkSuQmCC`
+
+/**
+ * Show the main window again after it was hidden to the tray, recreating it
+ * (straight at the backend URL) when it was destroyed instead.
+ */
+function showMainWindow () {
+  if (win && !win.isDestroyed()) {
+    win.show()
+    win.focus()
+    return
+  }
+  createWindow()
+  if (phase === 'app' && backendUrl) {
+    win?.loadURL(backendUrl).catch((err) => console.error('[desktop] re-show navigation failed:', err?.message ?? err))
+  }
+}
+
+/**
+ * Keep the app alive in the system tray while the window is closed: the
+ * backend (and with it every background task — scheduled reminders, running
+ * jobs) keeps running, matching the dsh 0.1.7 desktop behavior where closing
+ * the window never abandons in-flight work.
+ */
+function createTray () {
+  if (tray) return
+  const icon = nativeImage.createFromDataURL(TRAY_ICON_DATA_URL)
+  // The macOS menu bar wants ~18px; Windows scales the 64px source itself.
+  tray = new Tray(process.platform === 'darwin' ? icon.resize({ width: 18, height: 18 }) : icon)
+  tray.setToolTip('DeepSeek Harness — 后台运行中')
+  tray.setContextMenu(Menu.buildFromTemplate([
+    { label: '显示主窗口', click: () => showMainWindow() },
+    { type: 'separator' },
+    { label: '退出 DeepSeek Harness', click: () => app.quit() },
+  ]))
+  // Windows convention: a plain (left) click reopens the window.
+  tray.on('click', () => showMainWindow())
+}
 
 // The boot page reports its status listener via preload.cjs's dshBoot bridge;
 // the first boot starts then, so no early status event is lost to the page
@@ -492,6 +548,15 @@ function createWindow () {
     return { action: 'deny' }
   })
 
+  // Closing hides to the tray instead of tearing down: the backend keeps
+  // serving (background tasks, scheduled reminders) until a real quit from
+  // the tray menu or before-quit, which asks about that impact first.
+  win.on('close', (event) => {
+    if (quitting) return
+    event.preventDefault()
+    win?.hide()
+  })
+
   win.on('closed', () => {
     win = null
   })
@@ -572,6 +637,10 @@ async function attemptBoot () {
     if (!process.env.DSH_SOURCE_REPO) {
       sendStatus({ state: 'loading', message: '正在启用内置插件…' })
       ensureDesktopPlugins(desktopBackendRoot())
+      // Desktop feature defaults (scheduled reminders + its session-panel UI,
+      // shipped disabled upstream since dsh 0.1.7): id-targeted overrides in
+      // the profile patch layer, skipped once the user configures them.
+      ensureFeatureDefaults()
     }
 
     sendStatus({ state: 'loading', message: '正在启动 DeepSeek Harness 后端…' })
@@ -582,6 +651,7 @@ async function attemptBoot () {
 
     if (!win || win.isDestroyed()) return
     phase = 'app'
+    backendUrl = url
     await win.loadURL(url)
     // Expose this install's backend as the `dsh` CLI: rewrite the ~/.dsh/bin
     // shims (they track this install dir, so upgrades self-heal) and repair
@@ -847,41 +917,79 @@ async function maybeCheckForUpdates () {
 /** Open the window at once; the backend boot starts once the boot page signals ready. */
 async function boot () {
   createWindow()
+  createTray()
   // The update check runs detached from backend boot: it never blocks a step
   // and its failures never surface to the boot page.
   void maybeCheckForUpdates()
 }
 
-app.whenReady().then(boot)
+// With close-to-tray the process outlives its window, so a second launch
+// must focus the running instance instead of forking a second backend.
+if (!app.requestSingleInstanceLock()) {
+  app.quit()
+} else {
+  app.on('second-instance', () => showMainWindow())
+  app.whenReady().then(boot)
+}
 
 app.on('window-all-closed', () => {
+  // Close-to-tray keeps the window alive, so this only fires on a real quit
+  // (or a destroyed window); treat it as one.
   killBackend()
   app.quit()
 })
 
-app.on('before-quit', (event) => {
+/** Tear the backend down and re-enter the quit flow with the prompt answered. */
+function proceedWithQuit () {
   killBackend()
+  app.quit()
+}
+
+app.on('before-quit', (event) => {
   // A downloaded-but-uninstalled update gets one explicit question at quit:
   // installs only ever happen with the user's consent, and once answered this
   // session never asks again (re-entrant quits pass straight through).
-  if (!downloadedUpdate || !autoUpdater || skipQuitInstallPrompt) return
-  event.preventDefault()
-  skipQuitInstallPrompt = true
-  const choice = dialog.showMessageBoxSync({
-    type: 'question',
-    title: 'DeepSeek Harness',
-    message: `新版本 ${downloadedUpdate.version} 已下载完成，退出时安装吗？`,
-    detail: '安装完成后应用会自动重新启动。',
-    buttons: ['退出并安装更新', '直接退出'],
-    defaultId: 0,
-    cancelId: 1,
-    noLink: true,
-  })
-  if (choice === 0) {
-    // Silent install + force-run-after: no wizard, app relaunches into the
-    // new version.
-    autoUpdater.quitAndInstall(true, true)
-  } else {
-    app.quit()
+  if (downloadedUpdate && autoUpdater && !skipQuitInstallPrompt) {
+    event.preventDefault()
+    skipQuitInstallPrompt = true
+    const choice = dialog.showMessageBoxSync({
+      type: 'question',
+      title: 'DeepSeek Harness',
+      message: `新版本 ${downloadedUpdate.version} 已下载完成，退出时安装吗？`,
+      detail: '安装完成后应用会自动重新启动。',
+      buttons: ['退出并安装更新', '直接退出'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    })
+    if (choice === 0) {
+      // Silent install + force-run-after: no wizard, app relaunches into the
+      // new version.
+      killBackend()
+      autoUpdater.quitAndInstall(true, true)
+    } else {
+      proceedWithQuit()
+    }
+    return
   }
+  // Quitting stops the backend and with it every background task — closing
+  // the window only hides to the tray, so say so once per session. The
+  // update flow above already asked its own quit question.
+  if (!skipQuitTaskPrompt && !(downloadedUpdate && autoUpdater) && !quitting && backend && phase === 'app') {
+    event.preventDefault()
+    skipQuitTaskPrompt = true
+    const choice = dialog.showMessageBoxSync({
+      type: 'question',
+      title: 'DeepSeek Harness',
+      message: '退出 DeepSeek Harness？',
+      detail: '退出将停止后台运行的定时任务；仅关闭窗口会最小化到系统托盘，任务继续运行。',
+      buttons: ['退出', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    })
+    if (choice === 0) proceedWithQuit()
+    return
+  }
+  killBackend()
 })

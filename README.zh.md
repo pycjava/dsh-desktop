@@ -96,9 +96,15 @@ Windows 流程全程以用户同意为准:弹窗告知新版本,用户点击「�
 
 维护入口:插件 tarball(`plugins/`)、`backend/package.json`、`backend/desktop-plugins.json` 三处同步。
 
+### 功能默认值(dsh 0.1.7 起)
+
+dsh 0.1.7 上游默认关闭定时任务:`schedule`(后端服务 + Agent 的创建/查看/修改/删除工具)与 `ui-schedule`(会话面板任务目录)是 dsh-web-app bundle patch 里 `disabled: true` 的条目。桌面端会在 profile 的 `cordis.patch.yml` 追加 id 定向的 `disabled: false` 覆写来预启用这两项(`src/ensure-feature-defaults.cjs`,与 Web 插件页的开关写法一致);已存在任意方向的覆写即视为用户配置,永不改动。`time-context` 保持关闭(按周期消耗 token),需要时在应用插件页开启。
+
+关窗不再退出:窗口隐藏到系统托盘,后端继续运行后台任务(定时提醒、进行中的 job);二次启动只聚焦现有实例;真正退出前会提示一次退出将停止的任务——与官方 dsh 0.1.7 桌面行为一致。
+
 ## 说明
 
 - 后端是 npm 发布的 `@deepseek-ai/dsh`;已发布版本的 bump 提交可能还没出现在 deepseek-harness 的 GitHub master 上。排查打包产物回归时,解包 `dist-desktop/backend/node_modules` 下的 tarball 与 dsh 检出对比。
 - dev(经 `DSH_SOURCE_REPO` 的源码)与打包产物(registry 版)共用 `~/.dsh`(`DSH_HOME`)。pre-release 各版本之间会话格式不兼容;在开发机上冒烟测试安装器时,把 `DSH_HOME` 指向一次性目录。
 - MVP:仅本地运行。Linux 安装器、图标与代码签名/公证暂不在范围内(下一步)。
-- 关窗会杀掉后端进程树。Unix 上后端跑在自己的进程组里;Windows 上通过 `taskkill /T` 杀整棵树。
+- 退出(注意不是关窗——关窗是最小化到托盘)会杀掉后端进程树。Unix 上后端跑在自己的进程组里;Windows 上通过 `taskkill /T` 杀整棵树。

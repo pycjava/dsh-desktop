@@ -156,6 +156,12 @@ They are packaged as dependencies of the backend closure under `resources/backen
 
 Keep these three places in sync when updating plugins: `plugins/` tarballs, `backend/package.json`, and `backend/desktop-plugins.json`.
 
+### Feature defaults (since dsh 0.1.7)
+
+dsh 0.1.7 ships scheduled reminders disabled upstream: the `schedule` entry (backend service + the agent's create/list/update/delete tools) and `ui-schedule` (the session-panel task catalog) are `disabled: true` rows inside dsh-web-app's bundle patch. The desktop pre-enables both by appending id-targeted `disabled: false` overrides to the profile's `cordis.patch.yml` (`src/ensure-feature-defaults.cjs`, same edit the Web plugin page makes). An existing override — either direction — marks the feature user-configured and is never touched. `time-context` stays off (it spends tokens every interval); enable it in the app's plugin page if wanted.
+
+Closing the window no longer exits: it hides to a system tray while the backend keeps serving background tasks (scheduled reminders, running jobs), a second launch focuses the running instance, and a real quit asks once about the tasks it would stop — matching the official dsh 0.1.7 desktop behavior.
+
 ## Notes
 
 - The backend is the published `@deepseek-ai/dsh` from npm; a released
@@ -168,5 +174,6 @@ Keep these three places in sync when updating plugins: `plugins/` tarballs, `bac
   installer on a dev machine.
 - MVP: local run only. Linux installers, app icons, and code signing /
   notarization are out of scope for now (next steps).
-- Closing the window kills the backend process tree. On Unix the backend runs
-  in its own process group; on Windows the tree is killed via `taskkill /T`.
+- Quitting (not closing — that hides to the tray) kills the backend process
+  tree. On Unix the backend runs in its own process group; on Windows the tree
+  is killed via `taskkill /T`.
