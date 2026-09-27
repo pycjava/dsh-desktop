@@ -1,0 +1,13 @@
+# dsh-remote-control bundle patch.
+#
+# One host-plane row carries both halves:
+#   - Host service: lifecycle, pairing/device registry, operator endpoints
+#     inside Connection auth, independently authenticated /remote routes.
+#   - Browser half: sidebar launcher and shell.overlay control panel.
+#
+# Remote control remains OFF after every backend launch. The backend stays on
+# its existing loopback listener; phase 3 will add explicit HTTPS exposure.
+- insert:
+    - id: dsh-remote-control
+      name: dsh-remote-control
+      config: {}

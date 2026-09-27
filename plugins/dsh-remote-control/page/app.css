@@ -1,0 +1,303 @@
+/* dsh-remote-control mobile surface — self-contained (no host theme tokens:
+   /remote is a standalone page, not part of the desktop SPA). */
+
+:root {
+  --rc-bg: #f5f6f8;
+  --rc-card: #ffffff;
+  --rc-text: #1a1b1e;
+  --rc-dim: #6b7280;
+  --rc-border: #e2e4e9;
+  --rc-accent: #4d6bfe;
+  --rc-accent-text: #ffffff;
+  --rc-bubble-user: #4d6bfe;
+  --rc-bubble-user-text: #ffffff;
+  --rc-bubble-assistant: #ffffff;
+  --rc-danger: #d64545;
+  --rc-warn-bg: #fdf3e3;
+  --rc-warn-text: #8a5a00;
+  --rc-ok: #2f9e63;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --rc-bg: #151517;
+    --rc-card: #1e1e22;
+    --rc-text: #f3f4f6;
+    --rc-dim: #9ca3af;
+    --rc-border: #303036;
+    --rc-bubble-assistant: #232329;
+    --rc-warn-bg: #33270f;
+    --rc-warn-text: #e5b567;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--rc-bg);
+  color: var(--rc-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.app {
+  max-width: 720px;
+  margin: 0 auto;
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+}
+
+.boot, .center-note {
+  padding: 48px 24px;
+  text-align: center;
+  color: var(--rc-dim);
+}
+
+.banner {
+  margin: 10px 12px 0;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--rc-warn-bg);
+  color: var(--rc-warn-text);
+  font-size: 13px;
+}
+
+/* ── header ─────────────────────────────────────────────── */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+  background: var(--rc-card);
+  border-bottom: 1px solid var(--rc-border);
+}
+
+.topbar h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.topbar .back {
+  border: none;
+  background: transparent;
+  color: var(--rc-accent);
+  font: inherit;
+  font-size: 15px;
+  padding: 4px 6px;
+  cursor: pointer;
+}
+
+/* ── pairing ────────────────────────────────────────────── */
+
+.pair-card {
+  margin: 24px 14px;
+  padding: 20px 16px;
+  background: var(--rc-card);
+  border: 1px solid var(--rc-border);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pair-card h2 { margin: 0; font-size: 17px; }
+.pair-card p { margin: 0; color: var(--rc-dim); font-size: 14px; }
+.pair-card input[type="text"] {
+  font: inherit;
+  padding: 10px 12px;
+  border: 1px solid var(--rc-border);
+  border-radius: 10px;
+  background: var(--rc-bg);
+  color: var(--rc-text);
+}
+.pair-card .error { color: var(--rc-danger); font-size: 13px; }
+
+/* ── buttons ────────────────────────────────────────────── */
+
+.btn {
+  border: none;
+  border-radius: 10px;
+  font: inherit;
+  font-weight: 600;
+  padding: 11px 14px;
+  cursor: pointer;
+  background: var(--rc-accent);
+  color: var(--rc-accent-text);
+}
+.btn:disabled { opacity: .55; cursor: default; }
+.btn.secondary {
+  background: transparent;
+  color: var(--rc-accent);
+  border: 1px solid var(--rc-border);
+}
+.btn.danger { background: var(--rc-danger); }
+.btn.small { padding: 6px 10px; font-size: 13px; font-weight: 500; }
+
+/* ── session list ───────────────────────────────────────── */
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+}
+
+.workspace-heading { margin: 8px 2px 0; }
+.workspace-heading:first-child { margin-top: 0; }
+.workspace-name { font-size: 13px; font-weight: 600; color: var(--rc-text); }
+.workspace-path {
+  font-size: 11px;
+  color: var(--rc-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  text-align: left;
+  border: 1px solid var(--rc-border);
+  background: var(--rc-card);
+  border-radius: 12px;
+  padding: 12px 14px;
+  font: inherit;
+  color: var(--rc-text);
+  cursor: pointer;
+}
+
+.session-card .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+  background: var(--rc-dim);
+  opacity: .4;
+}
+.session-card .dot.on { background: var(--rc-ok); opacity: 1; }
+
+.session-card .meta { flex: 1; min-width: 0; }
+.session-card .title {
+  font-size: 15px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.session-card .sub {
+  font-size: 12px;
+  color: var(--rc-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── chat ───────────────────────────────────────────────── */
+
+.chat-scroll {
+  flex: 1;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.msg {
+  max-width: 88%;
+  padding: 9px 12px;
+  border-radius: 14px;
+  font-size: 14px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg.user {
+  align-self: flex-end;
+  background: var(--rc-bubble-user);
+  color: var(--rc-bubble-user-text);
+  border-bottom-right-radius: 4px;
+}
+
+.msg.assistant {
+  align-self: flex-start;
+  background: var(--rc-bubble-assistant);
+  border: 1px solid var(--rc-border);
+  border-bottom-left-radius: 4px;
+}
+
+.msg.tool, .msg.status {
+  align-self: center;
+  max-width: 100%;
+  background: transparent;
+  border: none;
+  color: var(--rc-dim);
+  font-size: 12px;
+  padding: 2px 8px;
+  text-align: center;
+}
+
+.msg.tool .name { font-weight: 600; }
+.msg.tool .detail { display: block; opacity: .8; margin-top: 2px; }
+.msg.tool.error { color: var(--rc-danger); }
+
+.msg.approval {
+  align-self: stretch;
+  max-width: 100%;
+  background: var(--rc-warn-bg);
+  color: var(--rc-warn-text);
+  border-radius: 10px;
+  font-size: 13px;
+}
+
+.msg .time {
+  display: block;
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: .6;
+}
+
+/* ── composer ───────────────────────────────────────────── */
+
+.composer {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  background: var(--rc-card);
+  border-top: 1px solid var(--rc-border);
+}
+
+.composer textarea {
+  flex: 1;
+  font: inherit;
+  resize: none;
+  min-height: 40px;
+  max-height: 140px;
+  padding: 9px 12px;
+  border: 1px solid var(--rc-border);
+  border-radius: 12px;
+  background: var(--rc-bg);
+  color: var(--rc-text);
+}
+
+.composer .btn { flex: none; }

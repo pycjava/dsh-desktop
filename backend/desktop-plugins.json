@@ -1,6 +1,7 @@
 {
   "bundles": [
     "dsh-usage-ledger",
-    "dsh-git-tree"
+    "dsh-git-tree",
+    "dsh-remote-control"
   ]
 }

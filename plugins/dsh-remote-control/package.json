@@ -1,0 +1,63 @@
+{
+  "name": "dsh-remote-control",
+  "version": "0.4.3",
+  "private": true,
+  "description": "Secure remote control for DeepSeek Harness: QR pairing, revocable device credentials, and a restricted mobile session UI.",
+  "license": "MIT",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "service.js",
+    "auth.js",
+    "store.js",
+    "lan.js",
+    "reducer.js",
+    "client.js",
+    "page",
+    "cordis.patch.yml",
+    "README.md",
+    "locale",
+    "icon.svg"
+  ],
+  "scripts": {
+    "check": "node --check index.js && node --check service.js && node --check auth.js && node --check store.js && node --check lan.js && node --check reducer.js && node --check client.js && node --check page/app.js",
+    "test": "node --test test/phase2.test.mjs test/lan.test.mjs test/mobile-ui.test.mjs"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.4",
+    "@deepseek-ai/schemastery": "^3.18.4"
+  },
+  "icon": "./icon.svg",
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "remote-control",
+    "cordis"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-runtime"
+      ]
+    }
+  }
+}
